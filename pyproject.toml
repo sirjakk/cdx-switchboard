@@ -1,0 +1,19 @@
+[project]
+name = "cdx-switchboard"
+version = "0.1.0"
+description = "Safe multi-account switching and rate-limit ranking for the Codex CLI"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+cdx = "cdx_switchboard.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
