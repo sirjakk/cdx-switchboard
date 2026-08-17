@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 from pathlib import Path
 import shutil
+import socket
 import sys
 import tempfile
 
@@ -23,12 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     login = sub.add_parser("login", aliases=["add"], help="sign in and store another account")
-    login.add_argument("alias", nargs="?", help="short local name such as work or personal")
-    login.add_argument("--browser", action="store_true", help="use localhost browser login instead of device code")
+    login.add_argument("--device", action="store_true", help="use device-code login instead of browser login")
 
     relogin = sub.add_parser("relogin", help="refresh the stored login for an account")
     relogin.add_argument("account", nargs="?", help="alias, email, or account number (defaults to active)")
-    relogin.add_argument("--browser", action="store_true", help="use localhost browser login instead of device code")
+    relogin.add_argument("--device", action="store_true", help="use device-code login instead of browser login")
 
     rank = sub.add_parser("rank", help="rank accounts by immediately usable headroom")
     rank.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -64,10 +66,35 @@ def _assert_switch_safe(force: bool) -> None:
         )
 
 
+def _tunnel_command() -> str:
+    connection = os.environ.get("SSH_CONNECTION", "").split()
+    if len(connection) == 4:
+        host = connection[2]
+        port = connection[3]
+    else:
+        host = socket.gethostname()
+        port = "22"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port_option = f"-p {port} " if port != "22" else ""
+    return f"ssh {port_option}-N -L 1455:127.0.0.1:1455 {getpass.getuser()}@{host}"
+
+
+def _print_tunnel_help() -> None:
+    print("Browser login needs an SSH tunnel for the localhost callback.")
+    print("On the computer with your browser, open a second terminal and run:")
+    print()
+    print(f"  {_tunnel_command()}")
+    print()
+    print("Use the same SSH host and port you normally use, and leave that command running")
+    print("until login finishes. Then open the authorization URL printed below.")
+    print()
+
+
 def _rank(store: AccountStore, client: CodexClient, *, as_json: bool = False):
     accounts = store.accounts()
     if not accounts:
-        raise StoreError("no accounts stored; run `cdx login <alias>`")
+        raise StoreError("no accounts stored; run `cdx login`")
     with store.locked():
         store.sync_live_to_active()
         rows = rank_accounts(accounts, client)
@@ -82,17 +109,21 @@ def _rank(store: AccountStore, client: CodexClient, *, as_json: bool = False):
     return rows
 
 
-def cmd_login(store: AccountStore, client: CodexClient, alias: str | None, browser: bool) -> None:
+def cmd_login(store: AccountStore, client: CodexClient, device: bool) -> None:
     staging = _staging_dir(store)
     try:
-        print("Starting Codex browser login..." if browser else "Starting Codex device-code login for SSH...")
-        auth_bytes = client.login(staging, device_auth=not browser)
+        if device:
+            print("Starting Codex device-code login...")
+        else:
+            _print_tunnel_help()
+            print("Starting Codex browser login on remote port 1455...")
+        auth_bytes = client.login(staging, device_auth=device)
         with store.locked():
             if not store.active_account() and store.paths.live_auth.is_file():
                 previous = store.import_live()
                 store.activate(previous)
                 print(f"Preserved the existing Codex login as {previous.alias!r}.")
-            account = store.add(auth_bytes, alias)
+            account = store.add(auth_bytes)
             if running_codex_processes():
                 print(f"Stored {account.alias!r}; left the current account active because Codex is running.")
             else:
@@ -106,7 +137,7 @@ def cmd_relogin(
     store: AccountStore,
     client: CodexClient,
     selector: str | None,
-    browser: bool,
+    device: bool,
 ) -> None:
     account = store.resolve(selector)
     is_active = account.account_id == store.active_id()
@@ -114,9 +145,11 @@ def cmd_relogin(
         _assert_switch_safe(False)
     staging = _staging_dir(store)
     try:
-        method = "browser" if browser else "device-code"
+        method = "device-code" if device else "browser through SSH tunnel"
         print(f"Re-authenticating {account.alias!r} with {method} login...")
-        auth_bytes = client.login(staging, device_auth=not browser)
+        if not device:
+            _print_tunnel_help()
+        auth_bytes = client.login(staging, device_auth=device)
         with store.locked():
             current = store.resolve(account.account_id)
             updated = store.replace_auth(current, auth_bytes)
@@ -153,7 +186,7 @@ def cmd_list(store: AccountStore) -> None:
     accounts = store.accounts()
     active = store.active_id()
     if not accounts:
-        print("No accounts stored. Run `cdx login <alias>`.")
+        print("No accounts stored. Run `cdx login`.")
         return
     for account in accounts:
         mark = "*" if account.account_id == active else " "
@@ -199,7 +232,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             account = store.active_account()
             if not account:
-                raise StoreError("no active account; run `cdx login <alias>`")
+                raise StoreError("no active account; run `cdx login`")
             with store.locked():
                 store.activate(account)
             client.launch(store.paths.codex_home, args_list)
@@ -211,9 +244,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(args_list)
     try:
         if args.command in {"login", "add"}:
-            cmd_login(store, client, args.alias, args.browser)
+            cmd_login(store, client, args.device)
         elif args.command == "relogin":
-            cmd_relogin(store, client, args.account, args.browser)
+            cmd_relogin(store, client, args.account, args.device)
         elif args.command == "rank":
             _rank(store, client, as_json=args.json)
         elif args.command == "use":

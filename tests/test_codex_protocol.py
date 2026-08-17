@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import stat
 import tempfile
 import textwrap
@@ -16,6 +17,7 @@ import sys
 
 if sys.argv[1] == "login":
     Path(os.environ["CODEX_HOME"]).mkdir(parents=True, exist_ok=True)
+    Path(os.environ["CODEX_HOME"], "login-args.json").write_text(json.dumps(sys.argv[2:]))
     Path(os.environ["CODEX_HOME"], "auth.json").write_bytes(%r)
     raise SystemExit(0)
 
@@ -48,8 +50,17 @@ class CodexProtocolTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_login_uses_isolated_home(self):
-        auth = self.client.login(self.root / "stage")
+        stage = self.root / "stage"
+        auth = self.client.login(stage)
         self.assertIn(b"refresh-one", auth)
+        args = json.loads((stage / "login-args.json").read_text())
+        self.assertNotIn("--device-auth", args)
+
+    def test_device_login_is_an_explicit_option(self):
+        stage = self.root / "device-stage"
+        self.client.login(stage, device_auth=True)
+        args = json.loads((stage / "login-args.json").read_text())
+        self.assertIn("--device-auth", args)
 
     def test_reads_rate_limits_from_app_server(self):
         response = self.client.rate_limits(self.root / "account", timeout=2)

@@ -7,7 +7,7 @@ works primarily over SSH.
 It is an independent implementation. The three main commands are:
 
 ```text
-cdx login personal     # one-time device-code login; stores the account safely
+cdx login              # one-time browser login through an SSH tunnel
 cdx rank               # asks Codex for current limits and recommends an account
 cdx use 1              # switches to row 1 from the latest ranking
 ```
@@ -19,8 +19,8 @@ choose by number.
 
 - Login happens in an isolated staging directory. A cancelled or failed login
   never deletes or overwrites the active Codex credentials.
-- Device-code authentication is the default, which avoids localhost callback
-  and browser problems on SSH/headless machines.
+- Browser authentication is the default. The CLI prints the SSH tunnel command
+  needed to carry Codex's localhost callback from your browser to the server.
 - Account switches use an inter-process lock, identity checks, private file
   permissions, and atomic file replacement.
 - Relogin refuses to replace an account if the newly authenticated JWT belongs
@@ -34,8 +34,8 @@ choose by number.
   `--force`. Switching under a live session can let that session overwrite the
   newly selected credentials later.
 
-OpenAI documents `codex login --device-auth` as the preferred login for remote
-or headless environments and documents file credentials at
+OpenAI documents browser authentication as the normal `codex login` flow and
+documents file credentials at
 [`~/.codex/auth.json`](https://developers.openai.com/codex/auth).
 
 ## Requirements
@@ -44,8 +44,7 @@ or headless environments and documents file credentials at
   commands but does not yet get that guard)
 - Python 3.11+
 - A recent `codex` CLI with `codex app-server`
-- Device-code login enabled in each account's ChatGPT security settings or by
-  the relevant workspace administrator
+- An SSH client with local port forwarding
 
 No Python packages are required.
 
@@ -85,15 +84,26 @@ activated.
 Then add each account once:
 
 ```sh
-cdx login personal
-cdx login work
-cdx login backup
+cdx login
 cdx list
 ```
 
-For every login, the terminal shows a URL and one-time code. Open the URL on
-any device where you have a browser, sign into the intended account, and enter
-the code.
+Repeat `cdx login` for each additional account.
+
+For every login, `cdx` prints a tunnel command similar to this:
+
+```sh
+ssh -N -L 1455:127.0.0.1:1455 sirjak@your-server
+```
+
+Run it in a second terminal on the computer with your browser and leave it
+running. Back in the remote terminal, open the authorization URL printed by
+Codex and sign into the intended account. The browser callback travels through
+the tunnel to Codex on the remote machine. Stop the tunnel with Ctrl-C after
+login finishes. Each account is named automatically from its email address.
+
+If an administrator has enabled device authorization, `cdx login --device`
+remains available as an alternative.
 
 ## Daily workflow
 

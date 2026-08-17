@@ -27,7 +27,7 @@ class CodexClient:
         if not shutil.which(self.binary) and not Path(self.binary).is_file():
             raise CodexError(f"Codex CLI not found: {self.binary}")
 
-    def login(self, staging_home: Path, *, device_auth: bool = True) -> bytes:
+    def login(self, staging_home: Path, *, device_auth: bool = False) -> bytes:
         self.ensure_available()
         staging_home.mkdir(parents=True, exist_ok=True)
         staging_home.chmod(0o700)
@@ -39,6 +39,8 @@ class CodexClient:
         command.extend(["-c", FILE_STORE_OVERRIDE])
         try:
             result = subprocess.run(command, env=env, check=False)
+        except KeyboardInterrupt as exc:
+            raise CodexError("login cancelled") from exc
         except OSError as exc:
             raise CodexError(f"could not start Codex login: {exc}") from exc
         if result.returncode != 0:
