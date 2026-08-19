@@ -15,6 +15,19 @@ cdx use 1              # switches to row 1 from the latest ranking
 You can also run `cdx use best`, or run `cdx use` interactively to rank and
 choose by number.
 
+When working inside T3, `cdx switch` performs a complete unattended handoff. It
+schedules an independent systemd user service, stops `t3code.service`, selects
+the best usable account through the normal guarded `cdx use best` logic,
+verifies the active account, and restarts T3 even if switching fails. This is a
+disruptive command: the current T3 connection and Codex process will stop. It
+does not resume the exact thread automatically; after T3 reconnects, reopen the
+thread and say `continue`.
+
+Only the most recent handoff log is retained, normally at
+`$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`. If no XDG runtime directory
+is available, cdx uses a private, user-specific temporary directory instead.
+The helper records timestamps and high-level outcomes only, never credentials.
+
 ## Why this design is safer
 
 - Login happens in an isolated staging directory. A cancelled or failed login
@@ -45,6 +58,8 @@ documents file credentials at
 - Python 3.11+
 - A recent `codex` CLI with `codex app-server`
 - An SSH client with local port forwarding
+- systemd user services (`systemd-run --user` and `systemctl --user`) for
+  `cdx switch`
 
 No Python packages are required.
 

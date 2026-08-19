@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import getpass
+import io
 import os
 from pathlib import Path
 import shutil
@@ -13,8 +15,9 @@ import tempfile
 
 from . import __version__
 from .codex import CodexClient, CodexError, running_codex_processes
+from .handoff import AccountSelection, HandoffError, perform_handoff, schedule_handoff
 from .ranking import rank_accounts, render_json, render_table
-from .storage import AccountStore, StoreError
+from .storage import Account, AccountStore, StoreError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     use = sub.add_parser("use", help="switch the active Codex login")
     use.add_argument("account", nargs="?", help="alias, email, rank number, or 'best'")
     use.add_argument("--force", action="store_true", help="switch even if another Codex process appears active")
+
+    sub.add_parser("switch", help="hand off to the best account and restart T3")
 
     sub.add_parser("list", aliases=["ls"], help="list stored accounts without network access")
     sub.add_parser("current", help="show the active account")
@@ -160,7 +165,13 @@ def cmd_relogin(
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def cmd_use(store: AccountStore, client: CodexClient, selector: str | None, force: bool) -> None:
+def cmd_use(
+    store: AccountStore,
+    client: CodexClient,
+    selector: str | None,
+    force: bool,
+) -> AccountSelection | None:
+    previous_id = store.active_id()
     if selector == "best" or selector is None:
         rows = _rank(store, client)
         if selector is None:
@@ -169,7 +180,7 @@ def cmd_use(store: AccountStore, client: CodexClient, selector: str | None, forc
             selector = input("Account number to activate (blank cancels): ").strip()
             if not selector:
                 print("Cancelled.")
-                return
+                return None
         else:
             usable = next((row for row in rows if row.usable), None)
             if not usable:
@@ -180,6 +191,35 @@ def cmd_use(store: AccountStore, client: CodexClient, selector: str | None, forc
     with store.locked():
         store.activate(account)
     print(f"Active Codex account: {account.alias} ({account.email or account.method})")
+    return AccountSelection(account.account_id, account.alias, account.account_id != previous_id)
+
+
+def current_account(store: AccountStore) -> Account:
+    account = store.active_account()
+    if not account:
+        raise StoreError("no active account")
+    return account
+
+
+def _select_best_for_handoff(store: AccountStore, client: CodexClient) -> AccountSelection:
+    # Ranking output is intentionally discarded: the helper log contains only
+    # high-level handoff events and never credential or process details.
+    with redirect_stdout(io.StringIO()):
+        selection = cmd_use(store, client, "best", force=False)
+    assert selection is not None
+    return selection
+
+
+def _launcher_path() -> Path:
+    candidate = shutil.which(sys.argv[0]) or sys.argv[0]
+    return Path(candidate).resolve()
+
+
+def _run_switch_helper(store: AccountStore, client: CodexClient) -> None:
+    perform_handoff(
+        lambda: _select_best_for_handoff(store, client),
+        lambda: current_account(store).account_id,
+    )
 
 
 def cmd_list(store: AccountStore) -> None:
@@ -226,6 +266,14 @@ def main(argv: list[str] | None = None) -> None:
     store = AccountStore()
     client = CodexClient()
 
+    if args_list == ["_switch-helper"]:
+        try:
+            _run_switch_helper(store, client)
+        except (StoreError, CodexError, HandoffError) as exc:
+            print(f"cdx: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        return
+
     # `cdx` is also the safe launcher. Arguments beginning with '-' pass through
     # to Codex, while named switchboard commands are parsed below.
     if not args_list or (args_list and args_list[0].startswith("-") and args_list[0] not in {"--help", "--version"}):
@@ -251,12 +299,15 @@ def main(argv: list[str] | None = None) -> None:
             _rank(store, client, as_json=args.json)
         elif args.command == "use":
             cmd_use(store, client, args.account, args.force)
+        elif args.command == "switch":
+            log_path = schedule_handoff(_launcher_path())
+            print("Detached account handoff scheduled; T3 will stop and restart.")
+            print(f"Temporary log: {log_path}")
+            print("After T3 reconnects, reopen this thread and say `continue`.")
         elif args.command in {"list", "ls"}:
             cmd_list(store)
         elif args.command == "current":
-            account = store.active_account()
-            if not account:
-                raise StoreError("no active account")
+            account = current_account(store)
             print(f"{account.alias}\t{account.email or account.method}")
         elif args.command == "import-current":
             with store.locked():
@@ -267,6 +318,6 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(cmd_doctor(store, client, args.verbose))
         else:
             parser.print_help()
-    except (StoreError, CodexError) as exc:
+    except (StoreError, CodexError, HandoffError) as exc:
         print(f"cdx: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
