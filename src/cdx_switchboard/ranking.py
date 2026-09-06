@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
+from pathlib import Path
 from typing import Any
 
 from .codex import CodexClient, CodexError
@@ -140,11 +141,16 @@ def parse_rate_limits(account: Account, response: dict[str, Any]) -> RankedAccou
     return row
 
 
-def rank_accounts(accounts: list[Account], client: CodexClient) -> list[RankedAccount]:
+def rank_accounts(
+    accounts: list[Account],
+    client: CodexClient,
+    account_homes: dict[str, Path] | None = None,
+) -> list[RankedAccount]:
     rows: list[RankedAccount] = []
     for account in accounts:
         try:
-            rows.append(parse_rate_limits(account, client.rate_limits(account.home)))
+            home = (account_homes or {}).get(account.account_id, account.home)
+            rows.append(parse_rate_limits(account, client.rate_limits(home)))
         except (CodexError, OSError, ValueError) as exc:
             rows.append(RankedAccount(account=account, error=str(exc)))
     return sorted(rows, key=lambda row: row.sort_key, reverse=True)

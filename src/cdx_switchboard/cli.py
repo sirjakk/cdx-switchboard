@@ -42,7 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     use.add_argument("account", nargs="?", help="alias, email, rank number, or 'best'")
     use.add_argument("--force", action="store_true", help="switch even if another Codex process appears active")
 
-    sub.add_parser("switch", help="hand off to the best account and restart T3")
+    switch = sub.add_parser("switch", help="hand off to an account and restart T3")
+    switch.add_argument(
+        "account",
+        nargs="?",
+        help="alias, email, account number, or 'best' (defaults to best)",
+    )
 
     sub.add_parser("list", aliases=["ls"], help="list stored accounts without network access")
     sub.add_parser("current", help="show the active account")
@@ -102,10 +107,22 @@ def _rank(store: AccountStore, client: CodexClient, *, as_json: bool = False):
         raise StoreError("no accounts stored; run `cdx login`")
     with store.locked():
         store.sync_live_to_active()
-        rows = rank_accounts(accounts, client)
-        store.save_rank([row.account for row in rows])
         active = store.active_account()
-        if active and not running_codex_processes():
+        codex_running = bool(running_codex_processes())
+        # When T3 keeps its app-server alive, probe the active account through
+        # the canonical Codex home instead of a second copied auth.json. Any
+        # token rotation then lands in the live file T3 uses and is synchronized
+        # back into the switchboard vault below.
+        account_homes = (
+            {active.account_id: store.paths.codex_home}
+            if active and codex_running
+            else None
+        )
+        rows = rank_accounts(accounts, client, account_homes)
+        store.save_rank([row.account for row in rows])
+        if active and codex_running:
+            store.sync_live_to_active()
+        elif active:
             # app-server may have refreshed a stored token while reading usage.
             # Carry that newer token into the canonical Codex home.
             store.copy_to_live(active)
@@ -201,11 +218,15 @@ def current_account(store: AccountStore) -> Account:
     return account
 
 
-def _select_best_for_handoff(store: AccountStore, client: CodexClient) -> AccountSelection:
+def _select_for_handoff(
+    store: AccountStore,
+    client: CodexClient,
+    selector: str | None,
+) -> AccountSelection:
     # Ranking output is intentionally discarded: the helper log contains only
     # high-level handoff events and never credential or process details.
     with redirect_stdout(io.StringIO()):
-        selection = cmd_use(store, client, "best", force=False)
+        selection = cmd_use(store, client, selector or "best", force=False)
     assert selection is not None
     return selection
 
@@ -215,9 +236,13 @@ def _launcher_path() -> Path:
     return Path(candidate).resolve()
 
 
-def _run_switch_helper(store: AccountStore, client: CodexClient) -> None:
+def _run_switch_helper(
+    store: AccountStore,
+    client: CodexClient,
+    selector: str | None,
+) -> None:
     perform_handoff(
-        lambda: _select_best_for_handoff(store, client),
+        lambda: _select_for_handoff(store, client, selector),
         lambda: current_account(store).account_id,
     )
 
@@ -266,9 +291,12 @@ def main(argv: list[str] | None = None) -> None:
     store = AccountStore()
     client = CodexClient()
 
-    if args_list == ["_switch-helper"]:
+    if args_list and args_list[0] == "_switch-helper":
+        if len(args_list) > 2:
+            print("cdx: invalid switch-helper arguments", file=sys.stderr)
+            raise SystemExit(2)
         try:
-            _run_switch_helper(store, client)
+            _run_switch_helper(store, client, args_list[1] if len(args_list) == 2 else None)
         except (StoreError, CodexError, HandoffError) as exc:
             print(f"cdx: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
@@ -300,7 +328,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "use":
             cmd_use(store, client, args.account, args.force)
         elif args.command == "switch":
-            log_path = schedule_handoff(_launcher_path())
+            log_path = schedule_handoff(_launcher_path(), args.account)
             print("Detached account handoff scheduled; T3 will stop and restart.")
             print(f"Temporary log: {log_path}")
             print("After T3 reconnects, reopen this thread and say `continue`.")

@@ -2,11 +2,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from cdx_switchboard.handoff import (
     AccountSelection,
     HandoffError,
+    RUNTIME_ENV,
     TRANSIENT_UNIT,
     helper_command,
     operation_lock,
@@ -41,8 +42,11 @@ class HandoffTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.runtime = runtime_directory({}, temp_root=self.root)
+        self.platform = patch("cdx_switchboard.handoff.sys.platform", "linux")
+        self.platform.start()
 
     def tearDown(self):
+        self.platform.stop()
         self.temp.cleanup()
 
     @staticmethod
@@ -62,6 +66,30 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("--property=Type=exec", command)
         self.assertNotIn("--no-block", command)
         self.assertEqual(command[-2:], ["/opt/cdx-switchboard/cdx", "_switch-helper"])
+
+    def test_named_selector_is_forwarded_to_helper(self):
+        command = helper_command(
+            "/usr/bin/systemd-run",
+            Path("/opt/cdx-switchboard/cdx"),
+            self.runtime,
+            {},
+            "support",
+        )
+        self.assertEqual(command[-3:], ["/opt/cdx-switchboard/cdx", "_switch-helper", "support"])
+
+    def test_macos_schedule_detaches_named_helper(self):
+        popen = Mock()
+        with patch("cdx_switchboard.handoff.sys.platform", "darwin"), patch(
+            "cdx_switchboard.handoff.subprocess.Popen", popen
+        ):
+            log = schedule_handoff(
+                Path("/opt/cdx"),
+                "support",
+                environ={RUNTIME_ENV: str(self.runtime)},
+            )
+        self.assertEqual(log, self.runtime / "last-switch.log")
+        self.assertEqual(popen.call_args.args[0][-2:], ["_switch-helper", "support"])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     def test_systemd_user_services_unavailable(self):
         runner = Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))

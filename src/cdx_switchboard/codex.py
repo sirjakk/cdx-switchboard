@@ -69,7 +69,7 @@ class CodexClient:
             self._send(process.stdin, {
                 "id": 1,
                 "method": "initialize",
-                "params": {"clientInfo": {"name": "cdx-switchboard", "version": "0.1.0"}},
+                "params": {"clientInfo": {"name": "cdx-switchboard", "version": "0.1.3"}},
             })
             initialized = self._read_response(process, 1, timeout)
             if initialized.get("error"):
@@ -87,13 +87,22 @@ class CodexClient:
             return result
         finally:
             if process.stdin:
-                process.stdin.close()
-            process.terminate()
+                try:
+                    # EOF asks app-server to shut down cleanly. Give it time to
+                    # persist a rotated refresh token before falling back to
+                    # signals; immediate termination can preserve a stale token.
+                    process.stdin.close()
+                except OSError:
+                    pass
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=1)
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
             if process.stdout:
                 process.stdout.close()
 
@@ -141,23 +150,49 @@ class CodexClient:
 
 def running_codex_processes() -> list[str]:
     """Best-effort guard against switching beneath a live Codex session."""
-    if not Path("/proc").is_dir():
-        return []
     current = {os.getpid(), os.getppid()}
-    matches: list[str] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit() or int(entry.name) in current:
-            continue
+    commands: list[tuple[int, list[str]]] = []
+
+    if Path("/proc").is_dir():
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) in current:
+                continue
+            try:
+                parts = (entry / "cmdline").read_bytes().split(b"\0")
+                args = [part.decode(errors="replace") for part in parts if part]
+            except (OSError, ValueError):
+                continue
+            commands.append((int(entry.name), args))
+    else:
+        # macOS and the other BSDs do not expose Linux /proc.
         try:
-            parts = (entry / "cmdline").read_bytes().split(b"\0")
-            args = [part.decode(errors="replace") for part in parts if part]
-        except (OSError, ValueError):
-            continue
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return []
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(maxsplit=1)
+            if len(fields) != 2:
+                continue
+            try:
+                pid = int(fields[0])
+            except ValueError:
+                continue
+            if pid in current:
+                continue
+            commands.append((pid, fields[1].split()))
+
+    matches: list[str] = []
+    for _pid, args in commands:
         if not args:
             continue
         command = " ".join(args)
         executable = Path(args[0]).name
-        is_codex = executable in {"codex", "codex.js", "codex-x86_64-unknown-linux-musl"}
-        if is_codex and "app-server" not in args and " login" not in command:
+        is_codex = executable in {"codex", "codex.js"} or executable.startswith("codex-")
+        if is_codex:
             matches.append(command)
     return matches

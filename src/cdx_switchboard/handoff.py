@@ -1,4 +1,4 @@
-"""Detached systemd handoff orchestration for ``cdx switch``."""
+"""Detached T3 handoff orchestration for ``cdx switch``."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable, Iterator, Mapping, TextIO
@@ -18,6 +19,10 @@ from typing import Callable, Iterator, Mapping, TextIO
 T3_SERVICE = "t3code.service"
 TRANSIENT_UNIT = "cdx-switchboard-switch.service"
 RUNTIME_ENV = "CDX_SWITCH_RUNTIME_DIR"
+T3_MAC_BUNDLE_ID = "com.t3tools.t3code"
+T3_MAC_PROCESS_PATTERN = (
+    r"^/Applications/T3 Code \(Nightly\)\.app/Contents/MacOS/T3 Code \(Nightly\)$"
+)
 
 
 class HandoffError(RuntimeError):
@@ -144,6 +149,7 @@ def helper_command(
     launcher: Path,
     directory: Path,
     environ: Mapping[str, str] | None = None,
+    selector: str | None = None,
 ) -> list[str]:
     env = os.environ if environ is None else environ
     command = [
@@ -161,21 +167,45 @@ def helper_command(
         if value:
             command.append(f"--setenv={name}={value}")
     command.extend([str(launcher), "_switch-helper"])
+    if selector:
+        command.append(selector)
     return command
 
 
 def schedule_handoff(
     launcher: Path,
+    selector: str | None = None,
     *,
     environ: Mapping[str, str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     which: Callable[[str], str | None] | None = None,
 ) -> Path:
     run = runner or subprocess.run
-    systemd_run, _ = validate_user_systemd(runner=run, which=which)
     directory = runtime_directory(environ)
     log_path = directory / "last-switch.log"
-    command = helper_command(systemd_run, launcher, directory, environ)
+    if sys.platform == "darwin":
+        prepare_log(directory)
+        env = dict(os.environ if environ is None else environ)
+        env[RUNTIME_ENV] = str(directory)
+        try:
+            helper = [sys.executable, str(launcher), "_switch-helper"]
+            if selector:
+                helper.append(selector)
+            subprocess.Popen(
+                helper,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            raise HandoffError(f"could not schedule the detached switch helper: {exc}") from exc
+        return log_path
+
+    systemd_run, _ = validate_user_systemd(runner=run, which=which)
+    command = helper_command(systemd_run, launcher, directory, environ, selector)
     try:
         result = run(
             command,
@@ -250,6 +280,123 @@ def _wait_for_t3(
         sleeper(0.25)
 
 
+def _mac_t3_running(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> bool:
+    result = runner(
+        ["/usr/bin/pgrep", "-f", T3_MAC_PROCESS_PATTERN],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _wait_for_mac_t3(
+    *,
+    active: bool,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    sleeper: Callable[[float], None],
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while _mac_t3_running(runner=runner) != active:
+        if time.monotonic() >= deadline:
+            goal = "start" if active else "stop"
+            raise HandoffError(f"timed out waiting for T3 to {goal}")
+        sleeper(0.25)
+
+
+def _mac_t3(
+    action: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    if action == "stop":
+        command = [
+            "/usr/bin/osascript",
+            "-e",
+            f'tell application id "{T3_MAC_BUNDLE_ID}" to quit',
+        ]
+    elif action == "start":
+        command = ["/usr/bin/open", "-b", T3_MAC_BUNDLE_ID]
+    else:
+        raise ValueError(f"unknown T3 action: {action}")
+    result = runner(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise HandoffError(f"could not {action} T3")
+
+
+def _perform_macos_handoff(
+    switch_best: Callable[[], AccountSelection],
+    verify_current: Callable[[], str],
+    *,
+    runtime: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    sleeper: Callable[[float], None],
+    timeout: float,
+) -> None:
+    with operation_lock(runtime):
+        with _open_log(runtime, truncate=True) as log:
+            _log(log, "helper started")
+            failure: Exception | None = None
+            restart_failure: Exception | None = None
+            stopped = False
+            try:
+                if not _mac_t3_running(runner=runner):
+                    raise HandoffError("T3 is not running; refusing a disruptive handoff")
+                _mac_t3("stop", runner=runner)
+                _wait_for_mac_t3(
+                    active=False,
+                    runner=runner,
+                    sleeper=sleeper,
+                    timeout=timeout,
+                )
+                stopped = True
+                _log(log, "T3 stopped")
+                selection = switch_best()
+                change = "account changed" if selection.changed else "no account change necessary"
+                _log(log, f"selected account: {selection.alias} ({change})")
+                current_id = verify_current()
+                if current_id != selection.account_id:
+                    raise HandoffError("active account does not match the selected account")
+                _log(log, f"verification result: success ({selection.alias})")
+            except Exception as exc:
+                failure = exc
+                _log(log, "account handoff failure")
+            finally:
+                if stopped:
+                    try:
+                        _mac_t3("start", runner=runner)
+                        _wait_for_mac_t3(
+                            active=True,
+                            runner=runner,
+                            sleeper=sleeper,
+                            timeout=timeout,
+                        )
+                        _log(log, "T3 restarted")
+                    except Exception as exc:
+                        restart_failure = exc
+                        _log(log, "T3 restart failed")
+
+            if failure is None and restart_failure is None:
+                _log(log, "final success")
+                return
+            _log(log, "final failure")
+            if restart_failure is not None:
+                raise HandoffError("account handoff failed to restore T3") from restart_failure
+            assert failure is not None
+            raise HandoffError("account handoff failed; T3 was restarted") from failure
+
+
 def perform_handoff(
     switch_best: Callable[[], AccountSelection],
     verify_current: Callable[[], str],
@@ -264,6 +411,16 @@ def perform_handoff(
     sleep = sleeper or time.sleep
     find = which or shutil.which
     runtime = directory or runtime_directory()
+    if sys.platform == "darwin":
+        return _perform_macos_handoff(
+            switch_best,
+            verify_current,
+            runtime=runtime,
+            runner=run,
+            sleeper=sleep,
+            timeout=timeout,
+        )
+
     systemctl = find("systemctl")
     if not systemctl:
         raise HandoffError("cdx switch requires systemctl")

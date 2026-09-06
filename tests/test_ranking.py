@@ -1,7 +1,8 @@
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
-from cdx_switchboard.ranking import parse_rate_limits
+from cdx_switchboard.ranking import parse_rate_limits, rank_accounts
 from cdx_switchboard.storage import Account
 
 
@@ -34,6 +35,18 @@ class RankingTests(unittest.TestCase):
             }
         })
         self.assertFalse(row.usable)
+
+    def test_active_account_can_be_probed_through_live_codex_home(self):
+        one = account("one")
+        live_home = Path("/tmp/live-codex-home")
+        client = Mock()
+        client.rate_limits.return_value = {
+            "rateLimits": {
+                "primary": {"usedPercent": 10, "windowDurationMins": 300},
+            }
+        }
+        rank_accounts([one], client, {one.account_id: live_home})
+        client.rate_limits.assert_called_once_with(live_home)
 
 
 if __name__ == "__main__":

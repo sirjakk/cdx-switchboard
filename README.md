@@ -15,13 +15,13 @@ cdx use 1              # switches to row 1 from the latest ranking
 You can also run `cdx use best`, or run `cdx use` interactively to rank and
 choose by number.
 
-When working inside T3, `cdx switch` performs a complete unattended handoff. It
-schedules an independent systemd user service, stops `t3code.service`, selects
-the best usable account through the normal guarded `cdx use best` logic,
-verifies the active account, and restarts T3 even if switching fails. This is a
-disruptive command: the current T3 connection and Codex process will stop. It
-does not resume the exact thread automatically; after T3 reconnects, reopen the
-thread and say `continue`.
+When working inside T3, `cdx switch [account]` performs a complete unattended
+handoff. On Linux it schedules an independent systemd user service; on macOS it
+starts a detached helper. The helper stops T3, selects the requested account
+(or the best usable account when omitted), verifies it, and restarts T3 even if
+switching fails. This is a disruptive command: the current T3 connection and
+Codex process will stop. It does not resume the exact thread automatically;
+after T3 reconnects, reopen the thread and say `continue`.
 
 Only the most recent handoff log is retained, normally at
 `$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`. If no XDG runtime directory
@@ -43,9 +43,12 @@ The helper records timestamps and high-level outcomes only, never credentials.
   this project does not embed OAuth client IDs or call private ChatGPT endpoints.
 - The live Codex token is copied back only when it matches the active account
   and is newer, which protects refresh-token rotation.
-- Switching refuses while another Codex process appears active unless you pass
-  `--force`. Switching under a live session can let that session overwrite the
-  newly selected credentials later.
+- Linux and macOS process guards prevent `cdx use` from replacing credentials
+  beneath a live Codex or T3 app-server. Use `cdx switch [account]` for a safe
+  T3 handoff instead.
+- Ranking an active account uses the canonical live Codex home and allows the
+  app-server to exit cleanly, preserving any refresh-token rotation before the
+  credentials are synchronized back to the switchboard vault.
 
 OpenAI documents browser authentication as the normal `codex login` flow and
 documents file credentials at
@@ -53,13 +56,12 @@ documents file credentials at
 
 ## Requirements
 
-- Linux (the current process guard uses `/proc`; macOS can still run the core
-  commands but does not yet get that guard)
+- Linux or macOS
 - Python 3.11+
 - A recent `codex` CLI with `codex app-server`
 - An SSH client with local port forwarding
 - systemd user services (`systemd-run --user` and `systemctl --user`) for
-  `cdx switch`
+  `cdx switch` on Linux; the T3 application bundle on macOS
 
 No Python packages are required.
 
@@ -135,6 +137,8 @@ cdx use personal            # alias
 cdx use name@example.com    # email
 cdx use best                # refresh ranking and switch automatically
 cdx use                     # interactive rank-and-prompt flow
+cdx switch support          # safely hand T3 to a named account
+cdx switch                  # safely hand T3 to the best account
 cdx relogin personal        # renew one stored login safely
 cdx current
 cdx rank --json
