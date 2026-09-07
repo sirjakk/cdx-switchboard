@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from cdx_switchboard.handoff import (
     AccountSelection,
     HandoffError,
     RUNTIME_ENV,
+    T3_MAC_PROCESS_PATTERN,
     TRANSIENT_UNIT,
     helper_command,
     operation_lock,
@@ -90,6 +92,13 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(log, self.runtime / "last-switch.log")
         self.assertEqual(popen.call_args.args[0][-2:], ["_switch-helper", "support"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_macos_process_pattern_includes_t3_backend(self):
+        executable = "/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)"
+        self.assertIsNotNone(re.search(T3_MAC_PROCESS_PATTERN, executable))
+        self.assertIsNotNone(
+            re.search(T3_MAC_PROCESS_PATTERN, executable + " /Applications/T3/app/server.mjs")
+        )
 
     def test_systemd_user_services_unavailable(self):
         runner = Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))

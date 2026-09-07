@@ -69,7 +69,7 @@ class CodexClient:
             self._send(process.stdin, {
                 "id": 1,
                 "method": "initialize",
-                "params": {"clientInfo": {"name": "cdx-switchboard", "version": "0.1.3"}},
+                "params": {"clientInfo": {"name": "cdx-switchboard", "version": "0.1.4"}},
             })
             initialized = self._read_response(process, 1, timeout)
             if initialized.get("error"):

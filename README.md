@@ -27,6 +27,9 @@ Only the most recent handoff log is retained, normally at
 `$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`. If no XDG runtime directory
 is available, cdx uses a private, user-specific temporary directory instead.
 The helper records timestamps and high-level outcomes only, never credentials.
+On macOS, the helper waits for both the T3 window process and its backend server
+to exit before replacing `auth.json`; a backend that is still shutting down is
+not mistaken for a separate active session.
 
 ## Why this design is safer
 

@@ -21,7 +21,7 @@ TRANSIENT_UNIT = "cdx-switchboard-switch.service"
 RUNTIME_ENV = "CDX_SWITCH_RUNTIME_DIR"
 T3_MAC_BUNDLE_ID = "com.t3tools.t3code"
 T3_MAC_PROCESS_PATTERN = (
-    r"^/Applications/T3 Code \(Nightly\)\.app/Contents/MacOS/T3 Code \(Nightly\)$"
+    r"^/Applications/T3 Code \(Nightly\)\.app/Contents/MacOS/T3 Code \(Nightly\)( |$)"
 )
 
 

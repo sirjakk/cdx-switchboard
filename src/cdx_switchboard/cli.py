@@ -70,6 +70,14 @@ def _staging_dir(store: AccountStore) -> Path:
 def _assert_switch_safe(force: bool) -> None:
     processes = running_codex_processes()
     if processes and not force:
+        if any(
+            "mcp_servers.t3-code" in process or "codex-code-mode-host" in process
+            for process in processes
+        ):
+            raise StoreError(
+                "T3 is running a Codex process; use `cdx switch <account>` "
+                "for a safe handoff (or quit T3 before using `cdx use`)"
+            )
         raise StoreError(
             "a Codex process appears to be running; exit it before switching "
             "(or use --force if you know it cannot write auth.json)"
