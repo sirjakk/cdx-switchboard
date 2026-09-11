@@ -12,6 +12,15 @@ def account(alias: str) -> Account:
 
 
 class RankingTests(unittest.TestCase):
+    def test_server_spend_limit_is_distinguished_from_usage_windows(self):
+        row = parse_rate_limits(account("one"), {"rateLimits": {
+            "spendControlReached": True,
+            "primary": {"usedPercent": 0, "windowDurationMins": 300},
+        }})
+        self.assertFalse(row.usable)
+        self.assertIn("SPEND LIMIT", render_table([row], None))
+        self.assertTrue(row.as_json(False, 1)["spend_control_reached"])
+
     def test_revoked_login_has_actionable_one_line_error(self):
         client = Mock()
         client.rate_limits.side_effect = AuthenticationRequired("revoked")

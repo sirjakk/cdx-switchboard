@@ -52,6 +52,7 @@ class RankedAccount:
     windows: list[Window] = field(default_factory=list)
     credits: int = 0
     reached: bool = False
+    spend_control_reached: bool = False
     error: str | None = None
 
     @property
@@ -85,6 +86,7 @@ class RankedAccount:
             "ready_percent": self.ready,
             "budget_percent": self.budget,
             "credits": self.credits,
+            "spend_control_reached": self.spend_control_reached,
             "error": self.error,
             "windows": [
                 {
@@ -124,6 +126,7 @@ def parse_rate_limits(account: Account, response: dict[str, Any]) -> RankedAccou
         account=account,
         plan=str(snapshot.get("planType") or "?"),
         reached=bool(snapshot.get("rateLimitReachedType") or snapshot.get("spendControlReached")),
+        spend_control_reached=bool(snapshot.get("spendControlReached")),
     )
     for key, fallback in (("primary", "primary"), ("secondary", "secondary")):
         raw = snapshot.get(key)
@@ -176,6 +179,8 @@ def render_table(rows: list[RankedAccount], active_id: str | None) -> str:
             # Keep network response bodies and newlines out of the table.
             message = " ".join(row.error.split("body=", 1)[0].split())
             status = f"ERROR: {message[:180]}"
+        elif row.spend_control_reached:
+            status = "SPEND LIMIT"
         elif row.reached or not row.usable:
             status = "LIMITED"
         else:

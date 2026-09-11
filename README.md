@@ -195,6 +195,8 @@ Ranking intentionally stays simple and explainable:
 The table shows every returned window, its remaining percentage, reset time,
 plan, active account, and reset-credit count. `cdx use <number>` uses the order
 saved by the latest `cdx rank`.
+`SPEND LIMIT` means the server reports that a spending control was reached,
+even if the five-hour or weekly window still has room.
 
 ## Recovery
 
