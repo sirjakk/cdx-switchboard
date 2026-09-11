@@ -11,6 +11,28 @@ import time
 from .storage import AccountStore, StoreError, atomic_json, read_json
 
 
+def connection_status(store: AccountStore, settings: Path | None = None,
+                      launcher: Path | None = None):
+    settings = settings or Path.home() / ".t3/userdata/settings.json"
+    launcher = launcher or Path.home() / ".local/bin/cdx-codex"
+    config = read_json(settings) or {}
+    instance = config.get("providerInstances", {}).get("codex")
+    provider = (instance.get("config", {}) if isinstance(instance, dict)
+                else config.get("providers", {}).get("codex", {}))
+    binary = provider.get("binaryPath")
+    enabled = instance.get("enabled", True) if isinstance(instance, dict) else provider.get("enabled", True)
+    if enabled and isinstance(binary, str) and Path(binary).expanduser().resolve() == launcher.resolve():
+        return "connected"
+    status = read_json(store.paths.data_home / "t3-integration.json") or {}
+    if status.get("status") == "waiting" and status.get("pid"):
+        try:
+            os.kill(int(status["pid"]), 0)
+            return "waiting for current T3 turns to finish"
+        except (OSError, ValueError):
+            pass
+    return "not connected; run cdx setup --t3"
+
+
 def connect(store: AccountStore, settings: Path | None = None, launcher: Path | None = None):
     settings = settings or Path.home() / ".t3" / "userdata" / "settings.json"
     launcher = launcher or Path.home() / ".local" / "bin" / "cdx-codex"

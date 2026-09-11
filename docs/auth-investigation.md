@@ -1,5 +1,27 @@
 # Account and concurrency investigation
 
+## Mac version selection, September 11
+
+The Mac had two npm installations. `/opt/homebrew/bin/codex` ran 0.144.1,
+while `~/.nvm/versions/node/v24.18.0/bin/codex` ran 0.154.0. A non-interactive
+login shell selected the former; interactive shells loaded NVM from `.zshrc`
+and selected the latter. Managed cdx configuration also selected the older
+absolute Homebrew path. The earlier alternating version reports did not
+establish an actual downgrade; executable selection reproduces them.
+
+The Homebrew-prefix npm installation was updated explicitly to 0.154.0. The
+NVM command symlink now forwards to `/opt/homebrew/bin/codex`, so cached command
+paths and new shells reach the same installation. Its old package files remain
+available to processes already running. No login credentials were changed.
+The previous symlink target is recorded locally in the cdx installation backup.
+An explicit future npm installation under NVM could recreate a separate command.
+Version 0.2.1 makes `cdx doctor` report distinct installations and actual versions.
+
+The Mac's T3 configuration was also found missing its managed launcher after
+an earlier successful setup. The writer that removed it has not been identified.
+Doctor now checks the current settings instead of accepting the saved
+`connected` status as proof of an active integration.
+
 Investigated on September 10, 2026, on the main Mac and Arch Linux PC.
 
 ## Confirmed switchboard defect

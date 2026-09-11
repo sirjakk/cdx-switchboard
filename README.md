@@ -133,8 +133,10 @@ times. Exhausted accounts and errors go last. `SPEND LIMIT` means the server
 reports a spending cap, even when five-hour or weekly percentages remain.
 Relogin cannot remove that cap.
 
-Switching by alias remains available offline. `cdx doctor --verbose` checks
-installation and credential permissions. Login, relogin, rank, and use never
+Switching by alias remains available offline. `cdx doctor --verbose` shows the
+actual Codex version and path, warns about separate installations on PATH, and
+checks current T3 settings rather than trusting an old activation record.
+It also checks credential permissions. Login, relogin, rank, and use never
 delete saved accounts.
 
 ## Storage and testing

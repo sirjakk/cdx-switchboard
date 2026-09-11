@@ -260,16 +260,27 @@ def cmd_list(store: AccountStore) -> None:
 
 
 def cmd_doctor(store: AccountStore, client: CodexClient, verbose: bool) -> int:
+    from .diagnostics import alternate_binaries, codex_version
     failures = 0
     try:
         client.ensure_available()
-        print(f"ok  Codex CLI: {client.binary}")
+        print(f"ok  Codex CLI: {codex_version(client.binary)} at {client.binary}")
+        for binary in alternate_binaries(client.binary):
+            try:
+                version = codex_version(binary)
+            except CodexError:
+                version = "version unavailable"
+            print(f"WARN another Codex installation on PATH: {version} at {binary}")
+            print("     Shells and apps can select different copies. Use one canonical installation.")
     except CodexError as exc:
         print(f"ERR {exc}")
         failures += 1
     print(f"ok  switchboard data: {store.paths.data_home}")
     if store.paths.managed.is_file():
         print("ok  managed sessions: account pinned per process, token refresh coordinated")
+        from .t3_settings import connection_status
+        status = connection_status(store)
+        print(f"{'ok' if status == 'connected' else 'WARN'}  T3: {status}")
     active = store.active_account()
     if active:
         print(f"ok  active account: {active.alias}")
