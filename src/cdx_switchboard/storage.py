@@ -274,6 +274,15 @@ class AccountStore:
             raise StoreError("failed to update account")
         return updated
 
+    def live_matches(self, account: Account) -> bool:
+        try:
+            live = json.loads(self.paths.live_auth.read_bytes())
+            if account.identity:
+                return auth_profile(live).identity == account.identity
+            return live == json.loads(account.auth_path.read_bytes())
+        except (OSError, ValueError, AuthError):
+            return False
+
     def sync_live_to_active(self) -> bool:
         account = self.active_account()
         if not account or not self.paths.live_auth.is_file():

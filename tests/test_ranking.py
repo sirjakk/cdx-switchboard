@@ -2,7 +2,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
-from cdx_switchboard.ranking import parse_rate_limits, rank_accounts
+from cdx_switchboard.ranking import parse_rate_limits, rank_accounts, render_table
+from cdx_switchboard.codex import AuthenticationRequired, CodexError
 from cdx_switchboard.storage import Account
 
 
@@ -11,6 +12,20 @@ def account(alias: str) -> Account:
 
 
 class RankingTests(unittest.TestCase):
+    def test_revoked_login_has_actionable_one_line_error(self):
+        client = Mock()
+        client.rate_limits.side_effect = AuthenticationRequired("revoked")
+        rows = rank_accounts([account("one")], client)
+        self.assertFalse(rows[0].usable)
+        self.assertIn("cdx relogin one", rows[0].error)
+
+    def test_http_body_does_not_break_table(self):
+        client = Mock()
+        client.rate_limits.side_effect = CodexError('HTTP 500; body={\n"error": "server failure"\n}')
+        table = render_table(rank_accounts([account("one")], client), None)
+        self.assertIn("HTTP 500", table)
+        self.assertNotIn("server failure", table)
+
     def test_parses_windows_and_credits(self):
         row = parse_rate_limits(account("one"), {
             "rateLimits": {

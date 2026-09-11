@@ -42,14 +42,18 @@ not mistaken for a separate active session.
 - Relogin refuses to replace an account if the newly authenticated JWT belongs
   to a different user.
 - `cdx rank` calls the installed `codex app-server` method
-  `account/rateLimits/read`. Codex owns token refresh and server compatibility;
+  `account/rateLimits/read`. After an authentication failure it requests
+  `account/read` with `refreshToken: true`, then retries usage once. Codex owns
+  token refresh and server compatibility;
   this project does not embed OAuth client IDs or call private ChatGPT endpoints.
 - The live Codex token is copied back only when it matches the active account
   and is newer, which protects refresh-token rotation.
-- Linux and macOS process guards prevent `cdx use` from replacing credentials
-  beneath a live Codex or T3 app-server. Use `cdx switch [account]` for a safe
-  T3 handoff instead.
-- Ranking an active account uses the canonical live Codex home and allows the
+- `cdx use`, `cdx login`, and `cdx relogin` do not block based on running
+  processes. An idle background process does not prove an account is busy.
+  `cdx use` updates the login on disk; an existing session can keep its cached
+  account until restarted. `cdx switch [account]` also restarts T3.
+- Ranking an active account whose identity matches the live login uses the
+  canonical Codex home, regardless of running processes, and allows the
   app-server to exit cleanly, preserving any refresh-token rotation before the
   credentials are synchronized back to the switchboard vault.
 
@@ -194,6 +198,9 @@ saved by the latest `cdx rank`.
 
 ## Recovery
 
+- A 401 triggers one Codex-managed refresh and retry. If that login cannot be
+  recovered, the ranking row shows `cdx relogin <alias>` instead of a multiline
+  HTTP error. A revoked refresh token requires another browser login.
 - `cdx relogin <alias>` stages a fresh login and verifies identity before
   replacing the stored credentials.
 - `cdx doctor --verbose` checks the Codex binary, active account, credential
@@ -201,3 +208,12 @@ saved by the latest `cdx rank`.
 - Stored accounts are never deleted by login, relogin, rank, or use.
 - If the ranking protocol changes in a future Codex release, switching by alias
   remains available offline.
+
+## Using the same accounts on two computers
+
+Log into each account separately on each computer with `cdx login` or
+`cdx relogin <alias>`. Use the SSH callback tunnel or `--device` on the remote
+computer. Each computer keeps its own credential vault and refresh history.
+Do not routinely synchronize `auth.json` or the `accounts` directory between
+computers. Copying an older login back after token rotation can restore stale
+credentials. Synchronize the application code separately from account data.

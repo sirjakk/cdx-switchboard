@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 from . import __version__
-from .codex import CodexClient, CodexError, running_codex_processes
+from .codex import CodexClient, CodexError
 from .handoff import AccountSelection, HandoffError, perform_handoff, schedule_handoff
 from .ranking import rank_accounts, render_json, render_table
 from .storage import Account, AccountStore, StoreError
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     use = sub.add_parser("use", help="switch the active Codex login")
     use.add_argument("account", nargs="?", help="alias, email, rank number, or 'best'")
-    use.add_argument("--force", action="store_true", help="switch even if another Codex process appears active")
+    use.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
 
     switch = sub.add_parser("switch", help="hand off to an account and restart T3")
     switch.add_argument(
@@ -65,23 +65,6 @@ def _staging_dir(store: AccountStore) -> Path:
     staging_root.mkdir(parents=True, exist_ok=True)
     staging_root.chmod(0o700)
     return Path(tempfile.mkdtemp(prefix="login-", dir=staging_root))
-
-
-def _assert_switch_safe(force: bool) -> None:
-    processes = running_codex_processes()
-    if processes and not force:
-        if any(
-            "mcp_servers.t3-code" in process or "codex-code-mode-host" in process
-            for process in processes
-        ):
-            raise StoreError(
-                "T3 is running a Codex process; use `cdx switch <account>` "
-                "for a safe handoff (or quit T3 before using `cdx use`)"
-            )
-        raise StoreError(
-            "a Codex process appears to be running; exit it before switching "
-            "(or use --force if you know it cannot write auth.json)"
-        )
 
 
 def _tunnel_command() -> str:
@@ -116,24 +99,18 @@ def _rank(store: AccountStore, client: CodexClient, *, as_json: bool = False):
     with store.locked():
         store.sync_live_to_active()
         active = store.active_account()
-        codex_running = bool(running_codex_processes())
-        # When T3 keeps its app-server alive, probe the active account through
-        # the canonical Codex home instead of a second copied auth.json. Any
-        # token rotation then lands in the live file T3 uses and is synchronized
-        # back into the switchboard vault below.
+        # Always use the canonical home for its matching account. Process
+        # presence says nothing about account identity or token freshness.
+        use_live = active is not None and store.live_matches(active)
         account_homes = (
             {active.account_id: store.paths.codex_home}
-            if active and codex_running
+            if use_live
             else None
         )
         rows = rank_accounts(accounts, client, account_homes)
         store.save_rank([row.account for row in rows])
-        if active and codex_running:
+        if use_live:
             store.sync_live_to_active()
-        elif active:
-            # app-server may have refreshed a stored token while reading usage.
-            # Carry that newer token into the canonical Codex home.
-            store.copy_to_live(active)
     output = render_json(rows, store.active_id()) if as_json else render_table(rows, store.active_id())
     print(output)
     return rows
@@ -145,8 +122,9 @@ def cmd_login(store: AccountStore, client: CodexClient, device: bool) -> None:
         if device:
             print("Starting Codex device-code login...")
         else:
-            _print_tunnel_help()
-            print("Starting Codex browser login on remote port 1455...")
+            if os.environ.get("SSH_CONNECTION"):
+                _print_tunnel_help()
+            print("Starting Codex browser login...")
         auth_bytes = client.login(staging, device_auth=device)
         with store.locked():
             if not store.active_account() and store.paths.live_auth.is_file():
@@ -154,11 +132,8 @@ def cmd_login(store: AccountStore, client: CodexClient, device: bool) -> None:
                 store.activate(previous)
                 print(f"Preserved the existing Codex login as {previous.alias!r}.")
             account = store.add(auth_bytes)
-            if running_codex_processes():
-                print(f"Stored {account.alias!r}; left the current account active because Codex is running.")
-            else:
-                store.activate(account)
-                print(f"Stored and activated {account.alias!r} ({account.email or account.method}).")
+            store.activate(account)
+            print(f"Stored and activated {account.alias!r} ({account.email or account.method}).")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -170,20 +145,17 @@ def cmd_relogin(
     device: bool,
 ) -> None:
     account = store.resolve(selector)
-    is_active = account.account_id == store.active_id()
-    if is_active:
-        _assert_switch_safe(False)
     staging = _staging_dir(store)
     try:
-        method = "device-code" if device else "browser through SSH tunnel"
+        method = "device-code" if device else "browser"
         print(f"Re-authenticating {account.alias!r} with {method} login...")
-        if not device:
+        if not device and os.environ.get("SSH_CONNECTION"):
             _print_tunnel_help()
         auth_bytes = client.login(staging, device_auth=device)
         with store.locked():
             current = store.resolve(account.account_id)
             updated = store.replace_auth(current, auth_bytes)
-            if is_active:
+            if account.account_id == store.active_id():
                 store.copy_to_live(updated)
             print(f"Updated {updated.alias!r}; the stored identity was verified before replacement.")
     finally:
@@ -212,7 +184,6 @@ def cmd_use(
                 raise StoreError("no usable account is available")
             selector = usable.account.account_id
     account = store.resolve(selector)
-    _assert_switch_safe(force)
     with store.locked():
         store.activate(account)
     print(f"Active Codex account: {account.alias} ({account.email or account.method})")

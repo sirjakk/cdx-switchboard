@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .codex import CodexClient, CodexError
+from .codex import AuthenticationRequired, CodexClient, CodexError
 from .storage import Account
 
 
@@ -151,6 +151,11 @@ def rank_accounts(
         try:
             home = (account_homes or {}).get(account.account_id, account.home)
             rows.append(parse_rate_limits(account, client.rate_limits(home)))
+        except AuthenticationRequired:
+            rows.append(RankedAccount(
+                account=account,
+                error=f"login expired or revoked; run `cdx relogin {account.alias}`",
+            ))
         except (CodexError, OSError, ValueError) as exc:
             rows.append(RankedAccount(account=account, error=str(exc)))
     return sorted(rows, key=lambda row: row.sort_key, reverse=True)
@@ -168,7 +173,9 @@ def render_table(rows: list[RankedAccount], active_id: str | None) -> str:
         active = "*" if row.account.account_id == active_id else " "
         windows = "  ".join(window.display() for window in row.windows) or "-"
         if row.error:
-            status = f"ERROR: {row.error}"
+            # Keep network response bodies and newlines out of the table.
+            message = " ".join(row.error.split("body=", 1)[0].split())
+            status = f"ERROR: {message[:180]}"
         elif row.reached or not row.usable:
             status = "LIMITED"
         else:

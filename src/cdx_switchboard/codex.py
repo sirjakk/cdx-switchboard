@@ -11,12 +11,33 @@ import subprocess
 import time
 from typing import Any
 
+from . import __version__
 
 FILE_STORE_OVERRIDE = 'cli_auth_credentials_store="file"'
 
 
 class CodexError(RuntimeError):
     pass
+
+
+class AuthenticationRequired(CodexError):
+    """The stored login could not be recovered by Codex."""
+
+
+def _error_message(response: dict[str, Any]) -> str:
+    error = response.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "Codex app-server returned an error")
+    return str(error or "Codex app-server returned an error")
+
+
+def _auth_error(message: str) -> bool:
+    return any(marker in message.casefold() for marker in (
+        "401", "unauthorized", "token_revoked", "token_expired",
+        "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated",
+        "sign in again", "signing in again", "log in again",
+        "not logged in", "not authenticated", "authentication required",
+    ))
 
 
 class CodexClient:
@@ -60,8 +81,7 @@ class CodexClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             env=env,
         )
         try:
@@ -69,7 +89,7 @@ class CodexClient:
             self._send(process.stdin, {
                 "id": 1,
                 "method": "initialize",
-                "params": {"clientInfo": {"name": "cdx-switchboard", "version": "0.1.4"}},
+                "params": {"clientInfo": {"name": "cdx-switchboard", "version": __version__}},
             })
             initialized = self._read_response(process, 1, timeout)
             if initialized.get("error"):
@@ -77,10 +97,32 @@ class CodexClient:
             self._send(process.stdin, {"method": "initialized", "params": None})
             self._send(process.stdin, {"id": 2, "method": "account/rateLimits/read", "params": None})
             response = self._read_response(process, 2, timeout)
+            if response.get("error") and _auth_error(_error_message(response)):
+                # The usage endpoint can reject a cached access token without
+                # triggering refresh. Ask Codex to recover once, then retry.
+                self._send(process.stdin, {
+                    "id": 3, "method": "account/read", "params": {"refreshToken": True},
+                })
+                refreshed = self._read_response(process, 3, timeout)
+                if refreshed.get("error"):
+                    message = _error_message(refreshed)
+                    if _auth_error(message):
+                        raise AuthenticationRequired("login expired or revoked")
+                    raise CodexError(f"token refresh failed: {message}")
+                result = refreshed.get("result")
+                if not isinstance(result, dict):
+                    raise CodexError("Codex returned no account data after token refresh")
+                if result.get("account") is None:
+                    raise AuthenticationRequired("login expired or revoked")
+                self._send(process.stdin, {
+                    "id": 4, "method": "account/rateLimits/read", "params": None,
+                })
+                response = self._read_response(process, 4, timeout)
             if response.get("error"):
-                error = response["error"]
-                message = error.get("message") if isinstance(error, dict) else str(error)
-                raise CodexError(message or "Codex app-server returned an error")
+                message = _error_message(response)
+                if _auth_error(message):
+                    raise AuthenticationRequired("login expired or revoked")
+                raise CodexError(message)
             result = response.get("result")
             if not isinstance(result, dict):
                 raise CodexError("Codex app-server returned no rate-limit data")
@@ -108,23 +150,28 @@ class CodexClient:
 
     @staticmethod
     def _send(stream: Any, message: dict[str, Any]) -> None:
-        stream.write(json.dumps(message, separators=(",", ":")) + "\n")
+        stream.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
         stream.flush()
 
     @staticmethod
-    def _read_response(process: subprocess.Popen[str], request_id: int, timeout: float) -> dict[str, Any]:
+    def _read_response(process: subprocess.Popen[bytes], request_id: int, timeout: float) -> dict[str, Any]:
         assert process.stdout is not None
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + timeout
         try:
             while time.monotonic() < deadline:
-                remaining = max(0.0, deadline - time.monotonic())
-                if not selector.select(remaining):
-                    break
-                line = process.stdout.readline()
-                if not line:
-                    break
+                buffered = getattr(process, "_cdx_buffer", b"")
+                if b"\n" not in buffered:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if not selector.select(remaining):
+                        break
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    process._cdx_buffer = buffered + chunk
+                    continue
+                line, process._cdx_buffer = buffered.split(b"\n", 1)
                 try:
                     message = json.loads(line)
                 except ValueError:

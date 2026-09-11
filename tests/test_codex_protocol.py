@@ -7,7 +7,7 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
-from cdx_switchboard.codex import CodexClient, running_codex_processes
+from cdx_switchboard.codex import AuthenticationRequired, CodexClient, CodexError, running_codex_processes
 from tests.helpers import auth_bytes
 
 
@@ -71,6 +71,83 @@ class CodexProtocolTests(unittest.TestCase):
         response = self.client.rate_limits(account_home, timeout=2)
         self.assertEqual(response["rateLimits"]["primary"]["usedPercent"], 10)
         self.assertEqual((account_home / "clean-shutdown").read_text(), "done")
+
+    def recovery_server(self, mode):
+        self.binary.write_text(textwrap.dedent('''\
+            #!/usr/bin/env python3
+            import json, os, sys
+            from pathlib import Path
+            home = Path(os.environ["CODEX_HOME"])
+            home.mkdir(parents=True, exist_ok=True)
+            mode = MODE
+            requests = []
+            for line in sys.stdin:
+                message = json.loads(line)
+                requests.append(message)
+                request_id = message.get("id")
+                if request_id is None:
+                    continue
+                result = {}
+                error = None
+                if request_id == 2:
+                    error = {"message": "HTTP 500" if mode == "server-error" else "401 Unauthorized; token_revoked"}
+                elif request_id == 3:
+                    assert message["method"] == "account/read"
+                    assert message["params"] == {"refreshToken": True}
+                    if mode == "refresh-revoked":
+                        error = {"message": "refresh_token_reused: refresh token has already been used"}
+                    elif mode == "refresh-network-error":
+                        error = {"message": "refresh token request: connection timed out"}
+                    else:
+                        result = {"account": None if mode == "logged-out" else {"type": "chatgpt"}}
+                elif request_id == 4:
+                    if mode == "still-revoked":
+                        error = {"message": "401 Unauthorized"}
+                    else:
+                        result = {"rateLimits": {"primary": {"usedPercent": 10}}}
+                response = {"id": request_id, "error": error} if error else {"id": request_id, "result": result}
+                # One write with a notification and a response reproduces the
+                # buffered-pipe timeout that a select + readline loop can hit.
+                sys.stdout.write(json.dumps({"method": "account/updated"}) + "\\n" + json.dumps(response) + "\\n")
+                sys.stdout.flush()
+            (home / "requests.json").write_text(json.dumps(requests))
+            (home / "clean-shutdown").write_text("done")
+        ''').replace("MODE", repr(mode)))
+
+    def test_unauthorized_usage_refreshes_once_and_retries(self):
+        self.recovery_server("recover")
+        home = self.root / "recovery"
+        result = self.client.rate_limits(home, timeout=2)
+        self.assertEqual(result["rateLimits"]["primary"]["usedPercent"], 10)
+        requests = json.loads((home / "requests.json").read_text())
+        self.assertEqual([r["method"] for r in requests if r.get("id")], [
+            "initialize", "account/rateLimits/read", "account/read", "account/rateLimits/read",
+        ])
+
+    def test_revoked_refresh_and_retry_failures_require_login_without_looping(self):
+        for mode in ("refresh-revoked", "still-revoked", "logged-out"):
+            with self.subTest(mode=mode):
+                self.recovery_server(mode)
+                home = self.root / mode
+                with self.assertRaises(AuthenticationRequired):
+                    self.client.rate_limits(home, timeout=2)
+                self.assertTrue((home / "clean-shutdown").exists())
+                requests = json.loads((home / "requests.json").read_text())
+                self.assertEqual(sum(r["method"] == "account/read" for r in requests), 1)
+
+    def test_network_failures_are_not_mislabeled_as_revoked_login(self):
+        self.recovery_server("refresh-network-error")
+        with self.assertRaisesRegex(CodexError, "connection timed out") as raised:
+            self.client.rate_limits(self.root / "network", timeout=2)
+        self.assertNotIsInstance(raised.exception, AuthenticationRequired)
+
+    def test_non_auth_error_does_not_refresh(self):
+        self.recovery_server("server-error")
+        home = self.root / "server-error"
+        with self.assertRaisesRegex(CodexError, "HTTP 500"):
+            self.client.rate_limits(home, timeout=2)
+        requests = json.loads((home / "requests.json").read_text())
+        self.assertFalse(any(r["method"] == "account/read" for r in requests))
 
     def test_macos_process_guard_detects_codex_app_server(self):
         ps = subprocess.CompletedProcess(
