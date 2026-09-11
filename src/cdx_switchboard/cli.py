@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="check Codex and credential-storage configuration")
     doctor.add_argument("--verbose", action="store_true")
+    setup_parser = sub.add_parser("setup", help="enable account-pinned sessions and coordinated token refresh")
+    setup_parser.add_argument("--t3", action="store_true", help="connect the default T3 Codex provider")
+    repair = sub.add_parser("repair", help="sign in again only to accounts with unrecoverable logins")
+    repair.add_argument("--device", action="store_true", help="use device-code login")
     return parser
 
 
@@ -101,13 +105,21 @@ def _rank(store: AccountStore, client: CodexClient, *, as_json: bool = False):
         active = store.active_account()
         # Always use the canonical home for its matching account. Process
         # presence says nothing about account identity or token freshness.
-        use_live = active is not None and store.live_matches(active)
+        use_live = not store.paths.managed.is_file() and active is not None and store.live_matches(active)
         account_homes = (
             {active.account_id: store.paths.codex_home}
             if use_live
             else None
         )
-        rows = rank_accounts(accounts, client, account_homes)
+        if store.paths.managed.is_file():
+            from .managed import Authority
+            authorities = {a.home: Authority(a, client) for a in accounts}
+            class ManagedRankClient:
+                def rate_limits(self, home):
+                    return authorities[home].rate_limits()
+            rows = rank_accounts(accounts, ManagedRankClient())
+        else:
+            rows = rank_accounts(accounts, client, account_homes)
         store.save_rank([row.account for row in rows])
         if use_live:
             store.sync_live_to_active()
@@ -156,7 +168,9 @@ def cmd_relogin(
         auth_bytes = client.login(staging, device_auth=device)
         with store.locked():
             current = store.resolve(account.account_id)
-            updated = store.replace_auth(current, auth_bytes)
+            from .managed import account_lock
+            with account_lock(current):
+                updated = store.replace_auth(current, auth_bytes)
             if account.account_id == store.active_id():
                 store.copy_to_live(updated)
             print(f"Updated {updated.alias!r}; the stored identity was verified before replacement.")
@@ -254,6 +268,8 @@ def cmd_doctor(store: AccountStore, client: CodexClient, verbose: bool) -> int:
         print(f"ERR {exc}")
         failures += 1
     print(f"ok  switchboard data: {store.paths.data_home}")
+    if store.paths.managed.is_file():
+        print("ok  managed sessions: account pinned per process, token refresh coordinated")
     active = store.active_account()
     if active:
         print(f"ok  active account: {active.alias}")
@@ -276,7 +292,11 @@ def cmd_doctor(store: AccountStore, client: CodexClient, verbose: bool) -> int:
 def main(argv: list[str] | None = None) -> None:
     args_list = list(sys.argv[1:] if argv is None else argv)
     store = AccountStore()
-    client = CodexClient()
+    if store.paths.managed.is_file():
+        from .managed import managed_client
+        client = managed_client(store)
+    else:
+        client = CodexClient()
 
     if args_list and args_list[0] == "_switch-helper":
         if len(args_list) > 2:
@@ -293,6 +313,9 @@ def main(argv: list[str] | None = None) -> None:
     # to Codex, while named switchboard commands are parsed below.
     if not args_list or (args_list and args_list[0].startswith("-") and args_list[0] not in {"--help", "--version"}):
         try:
+            if store.paths.managed.is_file():
+                from .managed import run
+                raise SystemExit(run(store, client, args_list))
             with store.locked():
                 store.sync_live_to_active()
                 # A plain Codex login is already ready to launch. Recopying a
@@ -335,6 +358,20 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Imported and activated {account.alias!r}.")
         elif args.command == "doctor":
             raise SystemExit(cmd_doctor(store, client, args.verbose))
+        elif args.command == "setup":
+            from .managed import setup
+            setup(store, client)
+            if args.t3:
+                from .t3_settings import connect_or_schedule
+                print(f"T3: {connect_or_schedule(store)}")
+            print("Managed accounts enabled. cdx use selects new sessions; cdx switch also restarts T3.")
+        elif args.command == "repair":
+            rows = _rank(store, client)
+            failed = [row for row in rows if row.error and "cdx relogin" in row.error]
+            if not failed:
+                print("No accounts need a new login.")
+            for row in failed:
+                cmd_relogin(store, client, row.account.account_id, args.device)
         else:
             parser.print_help()
     except (StoreError, CodexError, HandoffError) as exc:

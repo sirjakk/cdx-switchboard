@@ -6,6 +6,7 @@ server. This checks client behavior, not OpenAI's token-revocation policy.
 """
 
 import base64
+import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -19,6 +20,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from cdx_switchboard.codex import CodexClient
+from cdx_switchboard.storage import AccountStore, Paths
+from cdx_switchboard.managed import setup
 
 
 ACCOUNT = "00000000-0000-4000-8000-000000000001"
@@ -37,7 +40,7 @@ def token():
     return f"eyJhbGciOiJub25lIn0.{payload}.test"
 
 
-def check(binary, *, process_count, separate_homes):
+def check(binary, *, process_count, separate_homes, managed=False):
     seen = []
     guard = threading.Lock()
 
@@ -87,8 +90,18 @@ def check(binary, *, process_count, separate_homes):
                     marker in k for marker in ("TOKEN", "API_KEY", "FEDERATION", "AUTHAPI", "IDENTITY")
                 )}
                 env.update(CODEX_HOME=str(home), CODEX_REFRESH_TOKEN_URL_OVERRIDE=url + "/token")
+                command = [binary]
+                if managed:
+                    vault = Path(tmp) / (f"vault-{index}" if separate_homes else "vault")
+                    store = AccountStore(Paths(vault, home))
+                    if not store.accounts():
+                        account = store.add((home / "auth.json").read_bytes(), "synthetic")
+                        store.activate(account)
+                        setup(store, CodexClient(binary))
+                    env.update(CDX_SWITCHBOARD_HOME=str(vault), CDX_CODEX_BIN=binary)
+                    command = [sys.executable, str(Path(__file__).resolve().parents[1] / "cdx-codex")]
                 process = subprocess.Popen(
-                    [binary, "app-server", "-c", 'cli_auth_credentials_store="file"',
+                    [*command, "app-server", "-c", 'cli_auth_credentials_store="file"',
                      "-c", f'chatgpt_base_url="{url}"'],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     env=env, bufsize=0,
@@ -107,7 +120,7 @@ def check(binary, *, process_count, separate_homes):
             # Each process receives responses in request order for these auth
             # calls because its auth manager serializes refresh requests.
             results = [CodexClient._read_response(p, request_id, 15) for p, request_id in requests]
-            return {"processes": process_count, "separate_homes": separate_homes,
+            return {"managed": managed, "processes": process_count, "separate_homes": separate_homes,
                     "refresh_requests": len(seen), "reused_token": len(seen) != len(set(seen)),
                     "authenticated": [bool(r.get("result", {}).get("account")) for r in results]}
     finally:
@@ -124,8 +137,14 @@ def check(binary, *, process_count, separate_homes):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--managed", action="store_true", help="check the coordinated cdx launcher")
+    args = parser.parse_args()
     binary = shutil.which("codex")
     if not binary:
         raise SystemExit("codex is not on PATH")
     for count, separate in ((2, False), (1, False), (2, True)):
-        print(json.dumps(check(binary, process_count=count, separate_homes=separate)), flush=True)
+        result = check(binary, process_count=count, separate_homes=separate, managed=args.managed)
+        print(json.dumps(result), flush=True)
+        if args.managed and (result["reused_token"] or not all(result["authenticated"])):
+            raise SystemExit("managed refresh concurrency check failed")

@@ -16,6 +16,17 @@ from . import __version__
 FILE_STORE_OVERRIDE = 'cli_auth_credentials_store="file"'
 
 
+def client_environment():
+    env = os.environ.copy()
+    if env.pop("CDX_MANAGED_RUNTIME", None):
+        for kind in ("REFRESH", "REVOKE"):
+            env.pop(f"CODEX_{kind}_TOKEN_URL_OVERRIDE", None)
+            original = env.pop(f"CDX_ORIGINAL_{kind}_URL", None)
+            if original:
+                env[f"CODEX_{kind}_TOKEN_URL_OVERRIDE"] = original
+    return env
+
+
 class CodexError(RuntimeError):
     pass
 
@@ -52,7 +63,7 @@ class CodexClient:
         self.ensure_available()
         staging_home.mkdir(parents=True, exist_ok=True)
         staging_home.chmod(0o700)
-        env = os.environ.copy()
+        env = client_environment()
         env["CODEX_HOME"] = str(staging_home)
         command = [self.binary, "login"]
         if device_auth:
@@ -71,10 +82,17 @@ class CodexClient:
             raise CodexError("codex login succeeded but did not create auth.json")
         return auth_path.read_bytes()
 
-    def rate_limits(self, account_home: Path, timeout: float = 12.0) -> dict[str, Any]:
+    def rate_limits(self, account_home: Path, timeout: float = 12.0, *, lock_fd: int | None = None) -> dict[str, Any]:
         """Read usage through Codex app-server, letting Codex own token refresh."""
+        return self._query(account_home, timeout, refresh_only=False, lock_fd=lock_fd)
+
+    def refresh(self, account_home: Path, timeout: float = 30.0, *, lock_fd: int | None = None) -> dict[str, Any]:
+        """Refresh managed credentials through Codex's account API."""
+        return self._query(account_home, timeout, refresh_only=True, lock_fd=lock_fd)
+
+    def _query(self, account_home: Path, timeout: float, *, refresh_only: bool, lock_fd: int | None) -> dict[str, Any]:
         self.ensure_available()
-        env = os.environ.copy()
+        env = client_environment()
         env["CODEX_HOME"] = str(account_home)
         process = subprocess.Popen(
             [self.binary, "app-server", "-c", FILE_STORE_OVERRIDE],
@@ -83,6 +101,7 @@ class CodexClient:
             stderr=subprocess.DEVNULL,
             bufsize=0,
             env=env,
+            pass_fds=() if lock_fd is None else (lock_fd,),
         )
         try:
             assert process.stdin is not None
@@ -95,9 +114,13 @@ class CodexClient:
             if initialized.get("error"):
                 raise CodexError("Codex app-server initialization failed")
             self._send(process.stdin, {"method": "initialized", "params": None})
-            self._send(process.stdin, {"id": 2, "method": "account/rateLimits/read", "params": None})
+            self._send(process.stdin, {
+                "id": 2,
+                "method": "account/read" if refresh_only else "account/rateLimits/read",
+                "params": {"refreshToken": True} if refresh_only else None,
+            })
             response = self._read_response(process, 2, timeout)
-            if response.get("error") and _auth_error(_error_message(response)):
+            if not refresh_only and response.get("error") and _auth_error(_error_message(response)):
                 # The usage endpoint can reject a cached access token without
                 # triggering refresh. Ask Codex to recover once, then retry.
                 self._send(process.stdin, {
@@ -126,6 +149,8 @@ class CodexClient:
             result = response.get("result")
             if not isinstance(result, dict):
                 raise CodexError("Codex app-server returned no rate-limit data")
+            if refresh_only and result.get("account") is None:
+                raise AuthenticationRequired("login expired or revoked")
             return result
         finally:
             if process.stdin:
@@ -186,7 +211,7 @@ class CodexClient:
 
     def launch(self, codex_home: Path, args: list[str]) -> None:
         self.ensure_available()
-        env = os.environ.copy()
+        env = client_environment()
         env["CODEX_HOME"] = str(codex_home)
         command = [self.binary, "-c", FILE_STORE_OVERRIDE, *args]
         try:

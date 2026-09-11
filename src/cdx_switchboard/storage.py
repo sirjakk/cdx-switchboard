@@ -73,6 +73,9 @@ class Paths:
             xdg = Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser()
             data_home = xdg / "cdx-switchboard"
         codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+        managed = read_json(data_home / "managed.json")
+        if isinstance(managed, dict) and managed.get("shared_codex_home"):
+            codex_home = Path(managed["shared_codex_home"])
         return cls(data_home=data_home, codex_home=codex_home)
 
     @property
@@ -94,6 +97,10 @@ class Paths:
     @property
     def live_auth(self) -> Path:
         return self.codex_home / "auth.json"
+
+    @property
+    def managed(self) -> Path:
+        return self.data_home / "managed.json"
 
 
 @dataclass(frozen=True)
@@ -289,7 +296,7 @@ class AccountStore:
         The active marker can be stale after `codex login`. Match the actual
         live identity before saving anything or choosing which copy to probe.
         """
-        if not self.paths.live_auth.is_file():
+        if self.paths.managed.is_file() or not self.paths.live_auth.is_file():
             return False
         try:
             live_bytes = self.paths.live_auth.read_bytes()
@@ -310,6 +317,8 @@ class AccountStore:
         return True
 
     def copy_to_live(self, account: Account) -> None:
+        if self.paths.managed.is_file():
+            return
         try:
             auth_bytes = account.auth_path.read_bytes()
             stored_profile = auth_profile(json.loads(auth_bytes))

@@ -36,7 +36,27 @@ than relying only on current upstream source.
 
 This is a demonstrated refresh race and a plausible contributor to the T3
 failures. It is not proof of the cause of every historical revocation, and
-version 0.1.6 does not patch T3 or Codex's refresh implementation.
+version 0.1.6 did not patch T3 or Codex's refresh implementation.
+
+## Managed sessions in version 0.2.0
+
+The managed launcher gives each process its own auth snapshot, pinned to a saved
+account. Local refresh callbacks coordinate through that account's file lock.
+The original Codex binary owns refresh and persistence in the canonical vault;
+workers receive the latest tokens and write only to their private snapshots.
+The helper inherits the lock so a killed wrapper cannot release it while the
+helper is still refreshing. Ranking and relogin share this coordination.
+
+On both tested binaries, the managed diagnostic's two concurrent processes
+authenticate successfully with one upstream refresh request and no token reuse.
+Requests within one process and independent logins also succeed. Unit tests
+cover concurrent refresh, stale worker writes, account switching, relogin,
+callback authentication, and nested commands. These are synthetic checks, not
+proof that a real account cannot be revoked or hit its spending limits.
+
+T3 uses the installed `cdx-codex` binary through its provider settings. Setup
+defers the settings change while turns are running because T3 closes affected
+provider processes when configuration changes. No T3 source patch is required.
 
 ## Cross-computer behavior
 

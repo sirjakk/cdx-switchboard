@@ -16,10 +16,25 @@ if [[ -e "$target" || -L "$target" ]]; then
 fi
 
 mkdir -p "$data_root" "$bin_dir"
+wrapper="$bin_dir/cdx-codex"
+if [[ -e "$wrapper" || -L "$wrapper" ]]; then
+  if [[ "$(readlink "$wrapper" 2>/dev/null || true)" != "$data_root/cdx-codex" ]]; then
+    echo "Refusing to overwrite existing command: $wrapper" >&2
+    exit 1
+  fi
+fi
 cp -R "$repo_dir/src" "$data_root/"
 cp "$repo_dir/cdx" "$data_root/cdx"
+python3 - "$repo_dir/cdx-codex" "$data_root/cdx-codex" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text().splitlines(keepends=True)
+Path(sys.argv[2]).write_text("#!" + sys.executable + "\n" + "".join(source[1:]))
+PY
 chmod +x "$data_root/cdx"
+chmod +x "$data_root/cdx-codex"
 ln -sfn "$data_root/cdx" "$target"
+ln -sfn "$data_root/cdx-codex" "$wrapper"
 
 echo "Installed $target"
 case ":$PATH:" in

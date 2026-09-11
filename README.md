@@ -1,244 +1,168 @@
 # cdx-switchboard
 
-`cdx-switchboard` is a small, dependency-free account switcher for the OpenAI
-Codex CLI. It is built for a person who owns several Codex-enabled accounts and
-works primarily over SSH.
+Save several Codex accounts on each computer, switch by name or number, and
+run concurrent sessions with coordinated token refresh. Python 3.11+ on macOS
+or Linux, with no third-party Python packages.
 
-It is an independent implementation. The three main commands are:
+## Install and enable
 
-```text
-cdx login              # one-time browser login through an SSH tunnel
-cdx rank               # asks Codex for current limits and recommends an account
-cdx use 1              # switches to row 1 from the latest ranking
-```
-
-You can also run `cdx use best`, or run `cdx use` interactively to rank and
-choose by number.
-
-When working inside T3, `cdx switch [account]` performs a complete unattended
-handoff. On Linux it schedules an independent systemd user service; on macOS it
-starts a detached helper. The helper stops T3, selects the requested account
-(or the best usable account when omitted), verifies it, and restarts T3 even if
-switching fails. This is a disruptive command: the current T3 connection and
-Codex process will stop. It does not resume the exact thread automatically;
-after T3 reconnects, reopen the thread and say `continue`.
-
-Only the most recent handoff log is retained, normally at
-`$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`. If no XDG runtime directory
-is available, cdx uses a private, user-specific temporary directory instead.
-The helper records timestamps and high-level outcomes only, never credentials.
-On macOS, the helper waits for both the T3 window process and its backend server
-to exit before replacing `auth.json`; a backend that is still shutting down is
-not mistaken for a separate active session.
-
-## Why this design is safer
-
-- Login happens in an isolated staging directory. A cancelled or failed login
-  never deletes or overwrites the active Codex credentials.
-- Browser authentication is the default. The CLI prints the SSH tunnel command
-  needed to carry Codex's localhost callback from your browser to the server.
-- Account switches use an inter-process lock, identity checks, private file
-  permissions, and atomic file replacement.
-- Relogin refuses to replace an account if the newly authenticated JWT belongs
-  to a different user.
-- `cdx rank` calls the installed `codex app-server` method
-  `account/rateLimits/read`. After an authentication failure it requests
-  `account/read` with `refreshToken: true`, then retries usage once. Codex owns
-  token refresh and server compatibility;
-  this project does not embed OAuth client IDs or call private ChatGPT endpoints.
-- The live Codex token is copied back only to its matching stored account
-  and is newer, which protects refresh-token rotation.
-- Regular `codex login` is recognized by the live credential identity, even
-  when the switchboard's active marker still names another account. Before
-  switching, cdx saves the newer login to its matching vault entry. Launching
-  `cdx` preserves an existing live login, including one not yet in the vault.
-- `cdx use`, `cdx login`, and `cdx relogin` do not block based on running
-  processes. An idle background process does not prove an account is busy.
-  `cdx use` updates the login on disk; an existing session can keep its cached
-  account until restarted. `cdx switch [account]` also restarts T3.
-- Ranking an active account whose identity matches the live login uses the
-  canonical Codex home, regardless of running processes, and allows the
-  app-server to exit cleanly, preserving any refresh-token rotation before the
-  credentials are synchronized back to the switchboard vault.
-
-OpenAI documents browser authentication as the normal `codex login` flow and
-documents file credentials at
-[`~/.codex/auth.json`](https://developers.openai.com/codex/auth).
-
-## Requirements
-
-- Linux or macOS
-- Python 3.11+
-- A recent `codex` CLI with `codex app-server`
-- An SSH client with local port forwarding
-- systemd user services (`systemd-run --user` and `systemctl --user`) for
-  `cdx switch` on Linux; the T3 application bundle on macOS
-
-No Python packages are required.
-
-## Install
-
-From this repository:
+Run on each computer separately:
 
 ```sh
 ./install.sh
+cdx setup --t3
 cdx doctor
 ```
 
-The installer copies the application to
-`${XDG_DATA_HOME:-~/.local/share}/cdx-switchboard/app` and links `cdx` into
-`${XDG_BIN_HOME:-~/.local/bin}`. It does not modify an existing Codex login or
-install Python dependencies. It also refuses to replace an unrelated existing
-`cdx` executable; move that command aside explicitly if you want to replace it.
+The installer puts `cdx` and `cdx-codex` in `~/.local/bin`, with the application
+under `~/.local/share/cdx-switchboard/app`. It refuses to overwrite unrelated
+commands. `XDG_BIN_HOME` and `XDG_DATA_HOME` override those locations.
 
-You can test the repository without installing it:
+`cdx setup` enables managed sessions and imports the current plain Codex login
+once, preserving newer credentials. Existing saved accounts remain available.
+After setup, the saved account vault owns managed authentication. Plain `codex`
+still uses the original credential file and bypasses refresh coordination;
+use `cdx` for terminal sessions.
 
-```sh
-./cdx --help
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-```
+`--t3` connects T3's default Codex provider to `~/.local/bin/cdx-codex` and saves
+the original settings in `t3-settings-before-managed.json` in the cdx data
+directory. If a T3 turn is running, a detached helper waits until turns finish
+before changing settings. Its status is in `t3-integration.json`. The helper
+waits up to 24 hours; rerun setup if its status is `pending` or `failed`.
+Custom provider homes require their own configuration and are not overwritten.
 
-## Initial setup over SSH
+## Accounts on multiple computers
 
-If the machine already has a Codex login you want to keep, import it first:
-
-```sh
-cdx import-current existing
-```
-
-This is also done automatically before the first newly logged-in account is
-activated.
-
-Then add each account once:
+Sign into each account once **on each computer**:
 
 ```sh
 cdx login
+cdx login                  # repeat for another account
 cdx list
 ```
 
-Repeat `cdx login` for each additional account.
+Each computer keeps an independent login for the same account. You can select
+the same account on both computers or use different accounts. A switch is local
+to the computer where you run it. Both computers still consume the account's
+shared usage limits.
 
-For every login, `cdx` prints a tunnel command similar to this:
+Do not copy or synchronize `auth.json` or the account vault between computers.
+Synchronize application code separately. An account already revoked by OpenAI
+needs one fresh login on the affected computer:
 
 ```sh
-ssh -N -L 1455:127.0.0.1:1455 sirjak@your-server
+cdx repair                 # walks through only unrecoverable saved logins
+cdx relogin support        # renew one named account
 ```
 
-Run it in a second terminal on the computer with your browser and leave it
-running. Back in the remote terminal, open the authorization URL printed by
-Codex and sign into the intended account. The browser callback travels through
-the tunnel to Codex on the remote machine. Stop the tunnel with Ctrl-C after
-login finishes. Each account is named automatically from its email address.
+For SSH login, cdx prints a callback tunnel command. Run the tunnel in another
+terminal on the computer with your browser, open the authorization URL, and
+sign into the intended account. Stop the tunnel after login completes. If your
+organization enables device authorization, `cdx login --device` and
+`cdx repair --device` are alternatives.
 
-If an administrator has enabled device authorization, `cdx login --device`
-remains available as an alternative.
+Login happens in a private staging directory. Cancellation preserves the old
+login. Relogin verifies the account identity before replacing credentials.
 
-## Daily workflow
-
-```sh
-cdx rank
-cdx use 1
-cdx                         # launches Codex with the active account
-```
-
-Useful variations:
+## Daily use
 
 ```sh
-cdx use personal            # alias
-cdx use name@example.com    # email
-cdx use best                # refresh ranking and switch automatically
-cdx use                     # interactive rank-and-prompt flow
-cdx switch support          # safely hand T3 to a named account
-cdx switch                  # safely hand T3 to the best account
-cdx relogin personal        # renew one stored login safely
+cdx rank                   # current usage, limits, and saved ranking numbers
+cdx use 1                  # select row 1 for new sessions
+cdx use support            # select by alias, without a network request
+cdx use best               # refresh usage and select the best usable account
+cdx                        # open managed Codex in this terminal
+cdx switch support         # select account and restart T3
 cdx current
-cdx rank --json
 ```
 
-Arguments beginning with `-` pass through when `cdx` launches Codex:
+`cdx use` does not stop or block on running processes. Existing managed sessions
+stay on their selected account. New processes use the new selection. T3 can
+reuse a process for an existing thread; `cdx switch` restarts T3 when you want
+that thread to use the new account. This ends running turns. After reconnecting,
+reopen the thread and say `continue`.
+
+On Linux, `cdx switch` uses a detached systemd user service. On macOS it uses a
+detached helper and the T3 application bundle. T3 is restarted even if account
+selection fails. The latest handoff log is at
+`$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`, or a private temporary
+directory when XDG runtime storage is unavailable.
+
+Flags pass through to the interactive launcher. Use `cdx-codex` for other Codex
+subcommands, or `CDX_ACCOUNT` to pin a command without changing the default:
 
 ```sh
 cdx --model gpt-5.6-sol
+cdx-codex resume
+CDX_ACCOUNT=support cdx-codex exec 'Explain this repository'
 ```
 
-`cdx` forces Codex's file credential store for consistent account switching
-while preserving the rest of the normal `~/.codex` configuration. If you run
-plain `codex` and have explicitly configured keyring-only credentials, that
-plain invocation may not see the account selected by `cdx use`; use the `cdx`
-launcher instead.
+## Concurrent sessions
 
-## Storage
+Each managed Codex process gets a private authentication snapshot and stays on
+that account. Normal configuration, skills, and conversation history are shared
+with the original Codex home. Switching accounts does not overwrite a running
+process's authentication.
 
-Account credentials and metadata live under:
+When Codex needs to refresh, its local callback asks cdx to acquire a file lock
+for the saved account. The original Codex binary refreshes and saves tokens in
+that account's vault. Other workers receive the updated tokens. Only one helper
+refreshes an account at a time, and a late worker write cannot replace newer
+vault credentials. Ranking and relogin use the same account lock.
+
+The callback listens only on loopback, uses a random private path, and accepts
+only refresh tokens issued to that runtime. Codex itself performs OAuth; cdx
+does not embed OAuth client IDs. A managed worker's logout ends that worker's
+login without revoking the saved login used by other workers.
+
+This integration uses Codex's `CODEX_REFRESH_TOKEN_URL_OVERRIDE` and
+`CODEX_REVOKE_TOKEN_URL_OVERRIDE` hooks plus `account/read`. It was tested with
+Codex 0.153.4 on Arch and 0.144.1 and 0.154.0 on macOS. Recheck the diagnostic after Codex
+upgrades. Plain `codex` processes and T3 providers using another binary bypass
+this coordination. Server-side revocation can still require a fresh login.
+
+## Ranking and recovery
+
+`cdx rank` asks Codex's `account/rateLimits/read` for usage. On authentication
+failure it requests one refresh and retries. An unrecoverable login shows
+`cdx relogin <alias>` rather than a multiline HTTP error.
+
+Usable accounts rank by the highest remaining percentage in their most
+constrained window. Ties prefer more long-window budget, then earlier reset
+times. Exhausted accounts and errors go last. `SPEND LIMIT` means the server
+reports a spending cap, even when five-hour or weekly percentages remain.
+Relogin cannot remove that cap.
+
+Switching by alias remains available offline. `cdx doctor --verbose` checks
+installation and credential permissions. Login, relogin, rank, and use never
+delete saved accounts.
+
+## Storage and testing
 
 ```text
 ~/.local/share/cdx-switchboard/
+  managed.json
   active.json
   last-rank.json
   accounts/<random-id>/
     account.json
     auth.json
+    refresh.lock
+  runtimes/session-*/       # private credentials, removed on normal exit
 ```
 
-Directories are mode `0700`; credential files are mode `0600`. Treat this
-directory like a password vault. Never commit, paste, or share its contents.
-
-For isolated testing, set `CDX_SWITCHBOARD_HOME`. To use another Codex binary,
-set `CDX_CODEX_BIN`.
-
-## Ranking behavior
-
-Ranking intentionally stays simple and explainable:
-
-1. Accounts with a server error, exhausted limits, or no usable window go last.
-2. The account with the highest remaining percentage on its most constrained
-   window ranks first.
-3. Ties prefer more remaining long-window budget, then the budget that resets
-   sooner so expiring capacity is less likely to be wasted.
-
-The table shows every returned window, its remaining percentage, reset time,
-plan, active account, and reset-credit count. `cdx use <number>` uses the order
-saved by the latest `cdx rank`.
-`SPEND LIMIT` means the server reports that a spending control was reached,
-even if the five-hour or weekly window still has room.
-
-## Recovery
-
-- A 401 triggers one Codex-managed refresh and retry. If that login cannot be
-  recovered, the ranking row shows `cdx relogin <alias>` instead of a multiline
-  HTTP error. A revoked refresh token requires another browser login.
-- `cdx relogin <alias>` stages a fresh login and verifies identity before
-  replacing the stored credentials.
-- `cdx doctor --verbose` checks the Codex binary, active account, credential
-  permissions, and keyring configuration.
-- Stored accounts are never deleted by login, relogin, rank, or use.
-- If the ranking protocol changes in a future Codex release, switching by alias
-  remains available offline.
-
-## Using the same accounts on two computers
-
-Log into each account separately on each computer with `cdx login` or
-`cdx relogin <alias>`. Use the SSH callback tunnel or `--device` on the remote
-computer. Each computer keeps its own credential vault and refresh history.
-Do not routinely synchronize `auth.json` or the `accounts` directory between
-computers. Copying an older login back after token rotation can restore stale
-credentials. Synchronize the application code separately from account data.
-
-### Concurrent T3 threads
-
-T3 can start separate Codex app-server processes for different threads. In the
-tested Codex versions, simultaneous refreshes in separate processes can submit
-the same refresh token twice. The switchboard's file lock does not coordinate
-Codex's own refresh requests. Removing process-based switch blocks does not fix
-that underlying race.
-
-Run the isolated diagnostic with the installed Codex CLI:
+Vault directories use mode `0700` and credentials use `0600`. Never commit,
+paste, or synchronize their contents. `CDX_SWITCHBOARD_HOME` selects a separate
+vault for tests. `CDX_CODEX_BIN` selects the original Codex binary.
 
 ```sh
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 scripts/check-refresh-concurrency.py
+python3 scripts/check-refresh-concurrency.py --managed
 ```
 
-It compares two processes sharing one home, two requests in one process, and
-two processes with independent synthetic logins. It uses temporary credentials
-and a local mock OAuth server; it does not read real logins or test OpenAI's
+The diagnostic uses temporary synthetic credentials and a local mock OAuth
+server. It compares separate processes sharing an account, requests within one
+process, and independent logins for the same user. Managed mode exits with an
+error if tokens are reused or authentication fails. It does not test OpenAI's
 revocation policy. See [investigation notes](docs/auth-investigation.md).
