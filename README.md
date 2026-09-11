@@ -46,8 +46,12 @@ not mistaken for a separate active session.
   `account/read` with `refreshToken: true`, then retries usage once. Codex owns
   token refresh and server compatibility;
   this project does not embed OAuth client IDs or call private ChatGPT endpoints.
-- The live Codex token is copied back only when it matches the active account
+- The live Codex token is copied back only to its matching stored account
   and is newer, which protects refresh-token rotation.
+- Regular `codex login` is recognized by the live credential identity, even
+  when the switchboard's active marker still names another account. Before
+  switching, cdx saves the newer login to its matching vault entry. Launching
+  `cdx` preserves an existing live login, including one not yet in the vault.
 - `cdx use`, `cdx login`, and `cdx relogin` do not block based on running
   processes. An idle background process does not prove an account is busy.
   `cdx use` updates the login on disk; an existing session can keep its cached
@@ -219,3 +223,22 @@ computer. Each computer keeps its own credential vault and refresh history.
 Do not routinely synchronize `auth.json` or the `accounts` directory between
 computers. Copying an older login back after token rotation can restore stale
 credentials. Synchronize the application code separately from account data.
+
+### Concurrent T3 threads
+
+T3 can start separate Codex app-server processes for different threads. In the
+tested Codex versions, simultaneous refreshes in separate processes can submit
+the same refresh token twice. The switchboard's file lock does not coordinate
+Codex's own refresh requests. Removing process-based switch blocks does not fix
+that underlying race.
+
+Run the isolated diagnostic with the installed Codex CLI:
+
+```sh
+python3 scripts/check-refresh-concurrency.py
+```
+
+It compares two processes sharing one home, two requests in one process, and
+two processes with independent synthetic logins. It uses temporary credentials
+and a local mock OAuth server; it does not read real logins or test OpenAI's
+revocation policy. See [investigation notes](docs/auth-investigation.md).

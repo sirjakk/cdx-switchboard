@@ -5,7 +5,7 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
-from cdx_switchboard.cli import _rank, cmd_use, cmd_relogin, cmd_login, _select_for_handoff, build_parser
+from cdx_switchboard.cli import _rank, cmd_use, cmd_relogin, cmd_login, current_account, main, _select_for_handoff, build_parser
 from cdx_switchboard.handoff import AccountSelection
 from cdx_switchboard.storage import AccountStore, Paths, atomic_write
 from tests.helpers import auth_bytes
@@ -45,6 +45,29 @@ class CliTests(unittest.TestCase):
 
 
 class AccountFlowTests(unittest.TestCase):
+    def test_rank_recognizes_new_plain_codex_login(self):
+        fresh = auth_bytes("two", "two@example.com", 300)
+        atomic_write(self.store.paths.live_auth, fresh)
+        _rank(self.store, self.client)
+        self.assertEqual(self.store.active_id(), self.two.account_id)
+        self.assertEqual(self.two.auth_path.read_bytes(), fresh)
+        self.client.rate_limits.assert_any_call(self.store.paths.codex_home)
+        self.assertNotIn(self.two.home, [c.args[0] for c in self.client.rate_limits.call_args_list])
+
+    def test_current_recognizes_plain_codex_login(self):
+        atomic_write(self.store.paths.live_auth, auth_bytes("two", "two@example.com", 300))
+        self.assertEqual(current_account(self.store).account_id, self.two.account_id)
+
+    def test_launcher_preserves_plain_login_even_when_not_in_vault(self):
+        fresh = auth_bytes("other", "other@example.com", 300)
+        atomic_write(self.store.paths.live_auth, fresh)
+        self.client.launch.side_effect = RuntimeError("exec replaces process")
+        with patch("cdx_switchboard.cli.AccountStore", return_value=self.store), patch(
+            "cdx_switchboard.cli.CodexClient", return_value=self.client
+        ), self.assertRaisesRegex(RuntimeError, "exec replaces process"):
+            main([])
+        self.assertEqual(self.store.paths.live_auth.read_bytes(), fresh)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -9,6 +9,25 @@ from tests.helpers import auth_bytes
 
 
 class StorageTests(unittest.TestCase):
+    def test_plain_codex_login_is_saved_to_its_actual_account_before_switch(self):
+        first = self.store.add(auth_bytes("one", "one@example.com", 100), "one")
+        second = self.store.add(auth_bytes("two", "two@example.com", 100), "two")
+        self.store.activate(first)
+        fresh = auth_bytes("two", "two@example.com", 300)
+        atomic_write(self.store.paths.live_auth, fresh)
+        self.store.activate(first)
+        self.assertEqual(second.auth_path.read_bytes(), fresh)
+        self.store.activate(second)
+        self.assertEqual(self.store.paths.live_auth.read_bytes(), fresh)
+
+    def test_sync_tracks_plain_codex_login_even_when_copy_is_identical(self):
+        first = self.store.add(auth_bytes("one", "one@example.com"), "one")
+        second = self.store.add(auth_bytes("two", "two@example.com"), "two")
+        self.store.activate(first)
+        atomic_write(self.store.paths.live_auth, second.auth_path.read_bytes())
+        self.store.sync_live_to_active()
+        self.assertEqual(self.store.active_id(), second.account_id)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)

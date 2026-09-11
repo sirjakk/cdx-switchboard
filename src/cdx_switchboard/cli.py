@@ -144,6 +144,8 @@ def cmd_relogin(
     selector: str | None,
     device: bool,
 ) -> None:
+    with store.locked():
+        store.sync_live_to_active()
     account = store.resolve(selector)
     staging = _staging_dir(store)
     try:
@@ -168,6 +170,8 @@ def cmd_use(
     selector: str | None,
     force: bool,
 ) -> AccountSelection | None:
+    with store.locked():
+        store.sync_live_to_active()
     previous_id = store.active_id()
     if selector == "best" or selector is None:
         rows = _rank(store, client)
@@ -191,6 +195,8 @@ def cmd_use(
 
 
 def current_account(store: AccountStore) -> Account:
+    with store.locked():
+        store.sync_live_to_active()
     account = store.active_account()
     if not account:
         raise StoreError("no active account")
@@ -227,6 +233,8 @@ def _run_switch_helper(
 
 
 def cmd_list(store: AccountStore) -> None:
+    with store.locked():
+        store.sync_live_to_active()
     accounts = store.accounts()
     active = store.active_id()
     if not accounts:
@@ -285,11 +293,15 @@ def main(argv: list[str] | None = None) -> None:
     # to Codex, while named switchboard commands are parsed below.
     if not args_list or (args_list and args_list[0].startswith("-") and args_list[0] not in {"--help", "--version"}):
         try:
-            account = store.active_account()
-            if not account:
-                raise StoreError("no active account; run `cdx login`")
             with store.locked():
-                store.activate(account)
+                store.sync_live_to_active()
+                # A plain Codex login is already ready to launch. Recopying a
+                # vault snapshot here could replace it with an older session.
+                if not store.paths.live_auth.is_file():
+                    account = store.active_account()
+                    if not account:
+                        raise StoreError("no active account; run `cdx login`")
+                    store.activate(account)
             client.launch(store.paths.codex_home, args_list)
         except (StoreError, CodexError) as exc:
             print(f"cdx: {exc}", file=sys.stderr)

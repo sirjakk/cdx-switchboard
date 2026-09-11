@@ -284,18 +284,26 @@ class AccountStore:
             return False
 
     def sync_live_to_active(self) -> bool:
-        account = self.active_account()
-        if not account or not self.paths.live_auth.is_file():
+        """Reconcile a regular Codex login with the matching stored account.
+
+        The active marker can be stale after `codex login`. Match the actual
+        live identity before saving anything or choosing which copy to probe.
+        """
+        if not self.paths.live_auth.is_file():
             return False
         try:
             live_bytes = self.paths.live_auth.read_bytes()
             live_auth = json.loads(live_bytes)
             live_profile = auth_profile(live_auth)
+            matches = [a for a in self.accounts() if a.identity and a.identity == live_profile.identity]
+            if len(matches) != 1:
+                return False
+            account = matches[0]
             stored_auth = json.loads(account.auth_path.read_bytes())
         except (OSError, ValueError, AuthError):
             return False
-        if account.identity and live_profile.identity != account.identity:
-            return False
+        if self.active_id() != account.account_id:
+            self._mark_active(account)
         if auth_freshness(live_auth, self.paths.live_auth) <= auth_freshness(stored_auth, account.auth_path):
             return False
         atomic_write(account.auth_path, live_bytes)
@@ -315,6 +323,9 @@ class AccountStore:
     def activate(self, account: Account) -> None:
         self.sync_live_to_active()
         self.copy_to_live(account)
+        self._mark_active(account)
+
+    def _mark_active(self, account: Account) -> None:
         atomic_json(self.paths.active, {
             "account_id": account.account_id,
             "alias": account.alias,
