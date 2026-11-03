@@ -1,6 +1,4 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-build/
+node_modules/
 dist/
-*.egg-info/
+.test-build/
+*.tgz

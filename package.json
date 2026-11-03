@@ -1,0 +1,46 @@
+{
+  "name": "codex-switchboard",
+  "version": "1.0.0",
+  "description": "Switch the OpenAI Codex CLI between your own accounts without losing thread history.",
+  "keywords": [
+    "codex",
+    "openai",
+    "codex-cli",
+    "accounts",
+    "switch",
+    "t3code"
+  ],
+  "license": "MIT",
+  "author": "sirjakk",
+  "type": "module",
+  "bin": {
+    "cdx": "dist/bin.js",
+    "codex-switchboard": "dist/bin.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 \".test-build/test/*.test.js\"",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.9.0"
+  },
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sirjakk/cdx-switchboard.git"
+  }
+}

@@ -1,170 +1,244 @@
-# cdx-switchboard
+# codex-switchboard
 
-Save several Codex accounts on each computer, switch by name or number, and
-run concurrent sessions with coordinated token refresh. Python 3.11+ on macOS
-or Linux, with no third-party Python packages.
-
-## Install and enable
-
-Run on each computer separately:
+`cdx` switches the [OpenAI Codex CLI](https://github.com/openai/codex) between
+your ChatGPT accounts, for example a personal and a work account, without
+signing out and back in. Threads keep their full history across switches, so
+you can continue a conversation on another account when one runs out of usage.
 
 ```sh
-./install.sh
-cdx setup --t3
-cdx doctor
+# Install from GitHub using the steps below.
+cdx login          # once per account
+cdx rank           # usage left on every account
+cdx switch         # move Codex to the account with the most usage left
 ```
 
-The installer puts `cdx` and `cdx-codex` in `~/.local/bin`, with the application
-under `~/.local/share/cdx-switchboard/app`. It refuses to overwrite unrelated
-commands. `XDG_BIN_HOME` and `XDG_DATA_HOME` override those locations.
+It works in a terminal, over SSH, and with [T3 Code](https://t3.codes), which it
+restarts onto the new account.
 
-`cdx setup` enables managed sessions and imports the current plain Codex login
-once, preserving newer credentials. Existing saved accounts remain available.
-After setup, the saved account vault owns managed authentication. Plain `codex`
-still uses the original credential file and bypasses refresh coordination;
-use `cdx` for terminal sessions.
+## Requirements
 
-`--t3` connects T3's default Codex provider to `~/.local/bin/cdx-codex` and saves
-the original settings in `t3-settings-before-managed.json` in the cdx data
-directory. If a T3 turn is running, a detached helper waits until turns finish
-before changing settings. Its status is in `t3-integration.json`. The helper
-waits up to 24 hours; rerun setup if its status is `pending` or `failed`.
-Custom provider homes require their own configuration and are not overwritten.
+- macOS or Linux. On Windows, use WSL.
+- Node.js 22.13 or newer.
+- The Codex CLI, installed any way (npm, Homebrew, or the standalone installer).
 
-## Accounts on multiple computers
+## Installing and updating cdx from GitHub
 
-Sign into each account once **on each computer**:
+The source of truth is `sirjakk/cdx-switchboard`, branch `main`.
+Both computers keep their only source checkout at `~/cdx-switchboard`.
+This package is private and is not published to the npm registry.
+
+For the first installation, clone the repository:
 
 ```sh
-cdx login
-cdx login                  # repeat for another account
-cdx list
+git clone git@github.com:sirjakk/cdx-switchboard.git ~/cdx-switchboard
 ```
 
-Each computer keeps an independent login for the same account. You can select
-the same account on both computers or use different accounts. A switch is local
-to the computer where you run it. Both computers still consume the account's
-shared usage limits.
-
-Do not copy or synchronize `auth.json` or the account vault between computers.
-Synchronize application code separately. An account already revoked by OpenAI
-needs one fresh login on the affected computer:
+After editing on either computer, test, commit and push to GitHub. On the
+other computer, pull and reinstall locally:
 
 ```sh
-cdx repair                 # walks through only unrecoverable saved logins
-cdx relogin support        # renew one named account
+cd ~/cdx-switchboard
+git pull --ff-only origin main
+npm ci
+npm test
+npm pack --silent
+# On Arch:
+npm install -g --prefix "$HOME/.local" ./codex-switchboard-1.0.0.tgz
+# On the Mac, use this instead:
+# /opt/homebrew/bin/npm install -g ./codex-switchboard-1.0.0.tgz
+rm ./codex-switchboard-1.0.0.tgz
 ```
 
-For SSH login, cdx prints a callback tunnel command. Run the tunnel in another
-terminal on the computer with your browser, open the authorization URL, and
-sign into the intended account. Stop the tunnel after login completes. If your
-organization enables device authorization, `cdx login --device` and
-`cdx repair --device` are alternatives.
+Use the tarball filename printed by `npm pack` if the version changes.
+The tarball is built and installed on the same computer. Do not copy packages
+between computers. `npm pack` builds the program; it does not publish it.
+Arch can also run `crewfleet update --only cdx --archlinux`, which pulls,
+tests, builds and installs the Git commit and skips it on later runs.
+`cdx update` updates Codex itself, not this cdx source repository.
 
-Login happens in a private staging directory. Cancellation preserves the old
-login. Relogin verifies the account identity before replacing credentials.
+Source, tests, dependency lockfile and documentation belong in Git. Generated
+`dist/`, `node_modules/`, `.test-build/` and tarballs are ignored. The installed
+npm copy is a build of this repository, not another source checkout. Saved
+accounts and machine settings stay outside the repository and are never synced.
+The former Python implementation is preserved in Git history.
 
-## Daily use
+## How it works
+
+Codex reads one login: `~/.codex/auth.json`. Every Codex process on a computer
+uses that folder, and it is also where Codex keeps thread history.
+
+cdx keeps a private copy of each account's login and switches by replacing
+`auth.json` in one atomic step. Thread history never moves, so any thread can
+be resumed on any account. (Tools that give each account its own `CODEX_HOME`
+split your history between folders instead.)
+
+Codex rotates refresh tokens: each refresh makes the previous token invalid.
+So before every change, cdx saves the login Codex is using now, so its saved
+copy is always the newest one. A login cdx has not seen before is saved as a
+new account, never overwritten.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `cdx rank [--json]` | Shows usage left on every account, best first |
+| `cdx switch [account]` | Switches to an account (default: the one with the most usage left) and restarts T3 if it is running |
+| `cdx use <account>` | Switches without restarting T3 |
+| `cdx restart` | Restarts T3 so it uses the current account |
+| `cdx list` | Lists saved accounts (no network) |
+| `cdx current` | Shows the account Codex is signed in as |
+| `cdx login` | Signs in to an account, saves it, and switches to it. `--device` signs in with a code; `--with-api-key` reads an API key from stdin; `--alias <name>` names it |
+| `cdx relogin [account]` | Signs in again to an account whose login expired |
+| `cdx repair` | Signs in again to every account whose login expired |
+| `cdx reset [account]` | Uses a usage reset credit, then switches to that account |
+| `cdx rename <account> <alias>` | Renames a saved account |
+| `cdx remove <account>` | Deletes a saved account from this computer |
+| `cdx import-current [alias]` | Saves the login Codex is using now |
+| `cdx update [--check]` | Updates the Codex CLI (npm installs) and restarts T3 |
+| `cdx config` | Shows or changes settings (see below) |
+| `cdx doctor` | Checks the setup |
+| `cdx [codex options]` | Starts Codex, like `codex` (except `--help` and `--version`, which are cdx's) |
+
+An account is its alias, its email, or its number in the last `cdx rank`.
+
+`cdx switch` checks that the account has usage left before changing anything.
+API-key accounts are billed per use, so `cdx switch` never picks one on its
+own; name it to switch to it.
+
+## Sign in only through cdx
+
+Use `cdx login` to add accounts, not `codex login` or `codex logout`. Codex
+revokes the signed-in login before it signs in or out, which also makes cdx's
+saved copy of that account stop working. If that happens, `cdx relogin
+<account>` fixes it.
+
+## Codex sessions that are already running
+
+A running Codex process keeps the account it started with in memory until it
+exits. Don't leave it running on the old account:
+
+- **T3:** `cdx switch` restarts T3 for you. If you run it from a T3 thread,
+  that turn ends. Reopen the thread after T3 reconnects and say "continue";
+  it keeps its history.
+- **Terminal:** exit Codex sessions before you switch, or right after, then
+  run `codex resume` to continue on the new account. A session left running
+  on the old account can still refresh that account's login and write it
+  into `auth.json`. cdx detects this and repairs it the next time it runs,
+  but exiting avoids it.
+- **Agents:** an agent that runs `cdx` inside Codex's sandbox needs permission
+  to write outside the project (cdx changes `~/.codex/auth.json`) and to use
+  the network.
+
+On macOS, cdx controls the T3 desktop app. On Linux, it controls the
+`t3code.service` user service that T3's headless install creates. If T3 runs
+some other way, restart it yourself after a switch, or turn this off with
+`cdx config t3 off`. The last switch is logged in
+`~/.local/share/cdx-switchboard/run/last-switch.log`.
+
+## Over SSH
+
+Codex's browser sign-in sends the browser to a `localhost` address on the
+computer running Codex. Over SSH, `cdx login` prints an `ssh -L` command to run
+on the computer with the browser, which forwards that address. Or sign in with
+a code instead: `cdx login --device`.
+
+If cdx guesses the wrong host name for that command, set it with
+`cdx config ssh-host <host>`.
+
+## Several computers
+
+Each computer has its own saved logins and its own current account. You can
+use the same account on two computers, or different ones. Sign in separately
+on each computer. Don't copy `auth.json` or cdx's data folder between
+computers: the copies share one refresh token, and when one computer refreshes
+it, the other's copy stops working.
+
+## Usage reset credits
+
+`cdx reset` uses the available credit that expires soonest. It saves the
+request's ID before sending it, so if the result is unclear (for example a
+timeout), running the same command again retries the same request instead of
+spending a second credit.
+
+## Security
+
+- Logins are stored in `~/.local/share/cdx-switchboard/accounts/` (or
+  `$XDG_DATA_HOME/cdx-switchboard`), in folders only you can read (mode 700)
+  and files only you can read (mode 600). They are plain files, like Codex's
+  own `auth.json`; they are not encrypted.
+- Files are written privately from the first byte and replaced atomically.
+  cdx never follows a symbolic link when it reads or writes a login.
+- cdx never prints, logs, or sends tokens. It talks to OpenAI only through
+  your installed Codex CLI.
+- Variables that would send tokens to another server
+  (`CODEX_REFRESH_TOKEN_URL_OVERRIDE` and similar) are removed before cdx
+  starts Codex for an account.
+- Locks are held by the operating system, so a crashed command never leaves a
+  stale lock and two commands never change logins at the same time.
+- Before switching, cdx checks that Codex really reads its login from
+  `auth.json`. If Codex keeps logins in the system keyring
+  (`cli_auth_credentials_store`), cdx refuses, because switching the file
+  would change nothing.
+- cdx keeps a few backups in `backups/` in its data folder: a login it could
+  not read, and a saved copy that a newer login replaced unexpectedly. They
+  are private like the rest.
+- `cdx remove` deletes cdx's copy only (it needs the exact alias or email). To
+  end a login everywhere, sign out of ChatGPT on the web.
+
+## Terms of use
+
+Use cdx only with accounts that are yours, such as a personal and a work
+account. OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use/)
+forbid sharing account credentials and circumventing rate limits. You are
+responsible for how you use your accounts.
+
+## Settings
+
+`cdx config <setting> <value>` changes a setting; `cdx config <setting> --unset`
+restores the default.
+
+| Setting | Meaning |
+| --- | --- |
+| `codex-path` | The Codex CLI to use, if cdx does not find the right one |
+| `ssh-host` | The host name the browser computer uses to reach this one |
+| `t3` | `off` stops cdx from restarting T3 |
+| `t3-service` | The T3 user service on Linux (default `t3code.service`) |
+
+These environment variables also apply: `CODEX_HOME` (Codex's folder, default
+`~/.codex`), `CDX_SWITCHBOARD_HOME` (cdx's data folder), and `CDX_CODEX_BIN`
+(the Codex CLI to use).
+
+## Troubleshooting
+
+Run `cdx doctor` first. It checks the Codex install, login storage, saved
+accounts, and T3 settings.
+
+- **A thread starts over after a switch:** check that T3 uses the same Codex
+  home as your terminal. `cdx doctor` reports a T3 setting that points
+  somewhere else.
+- **`login expired`:** run `cdx relogin <account>`.
+- **T3 did not come back after a switch:** see `last-switch.log` (path above),
+  then open T3 yourself.
+
+## Uninstall
 
 ```sh
-cdx rank                   # current usage, limits, and saved ranking numbers
-cdx use 1                  # select row 1 for new sessions
-cdx use support            # select by alias, without a network request
-cdx use best               # refresh usage and select the best usable account
-cdx                        # open managed Codex in this terminal
-cdx switch support         # select account and restart T3
-cdx current
+npm uninstall -g codex-switchboard
+rm -rf ~/.local/share/cdx-switchboard   # deletes cdx's saved logins
 ```
 
-`cdx use` does not stop or block on running processes. Existing managed sessions
-stay on their selected account. New processes use the new selection. T3 can
-reuse a process for an existing thread; `cdx switch` restarts T3 when you want
-that thread to use the new account. This ends running turns. After reconnecting,
-reopen the thread and say `continue`.
+Codex stays signed in to the current account.
 
-On Linux, `cdx switch` uses a detached systemd user service. On macOS it uses a
-detached helper and the T3 application bundle. T3 is restarted even if account
-selection fails. The latest handoff log is at
-`$XDG_RUNTIME_DIR/cdx-switchboard/last-switch.log`, or a private temporary
-directory when XDG runtime storage is unavailable.
-
-Flags pass through to the interactive launcher. Use `cdx-codex` for other Codex
-subcommands, or `CDX_ACCOUNT` to pin a command without changing the default:
+## Development
 
 ```sh
-cdx --model gpt-5.6-sol
-cdx-codex resume
-CDX_ACCOUNT=support cdx-codex exec 'Explain this repository'
+npm ci
+npm test
 ```
 
-## Concurrent sessions
+The tests use a fake Codex CLI in temporary folders. They never touch your
+real logins or T3.
 
-Each managed Codex process gets a private authentication snapshot and stays on
-that account. Normal configuration, skills, and conversation history are shared
-with the original Codex home. Switching accounts does not overwrite a running
-process's authentication.
+## License
 
-When Codex needs to refresh, its local callback asks cdx to acquire a file lock
-for the saved account. The original Codex binary refreshes and saves tokens in
-that account's vault. Other workers receive the updated tokens. Only one helper
-refreshes an account at a time, and a late worker write cannot replace newer
-vault credentials. Ranking and relogin use the same account lock.
-
-The callback listens only on loopback, uses a random private path, and accepts
-only refresh tokens issued to that runtime. Codex itself performs OAuth; cdx
-does not embed OAuth client IDs. A managed worker's logout ends that worker's
-login without revoking the saved login used by other workers.
-
-This integration uses Codex's `CODEX_REFRESH_TOKEN_URL_OVERRIDE` and
-`CODEX_REVOKE_TOKEN_URL_OVERRIDE` hooks plus `account/read`. It was tested with
-Codex 0.153.4 on Arch and 0.144.1 and 0.154.0 on macOS. Recheck the diagnostic after Codex
-upgrades. Plain `codex` processes and T3 providers using another binary bypass
-this coordination. Server-side revocation can still require a fresh login.
-
-## Ranking and recovery
-
-`cdx rank` asks Codex's `account/rateLimits/read` for usage. On authentication
-failure it requests one refresh and retries. An unrecoverable login shows
-`cdx relogin <alias>` rather than a multiline HTTP error.
-
-Usable accounts rank by the highest remaining percentage in their most
-constrained window. Ties prefer more long-window budget, then earlier reset
-times. Exhausted accounts and errors go last. `SPEND LIMIT` means the server
-reports a spending cap, even when five-hour or weekly percentages remain.
-Relogin cannot remove that cap.
-
-Switching by alias remains available offline. `cdx doctor --verbose` shows the
-actual Codex version and path, warns about separate installations on PATH, and
-checks current T3 settings rather than trusting an old activation record.
-It also checks credential permissions. Login, relogin, rank, and use never
-delete saved accounts.
-
-## Storage and testing
-
-```text
-~/.local/share/cdx-switchboard/
-  managed.json
-  active.json
-  last-rank.json
-  accounts/<random-id>/
-    account.json
-    auth.json
-    refresh.lock
-  runtimes/session-*/       # private credentials, removed on normal exit
-```
-
-Vault directories use mode `0700` and credentials use `0600`. Never commit,
-paste, or synchronize their contents. `CDX_SWITCHBOARD_HOME` selects a separate
-vault for tests. `CDX_CODEX_BIN` selects the original Codex binary.
-
-```sh
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-python3 scripts/check-refresh-concurrency.py
-python3 scripts/check-refresh-concurrency.py --managed
-```
-
-The diagnostic uses temporary synthetic credentials and a local mock OAuth
-server. It compares separate processes sharing an account, requests within one
-process, and independent logins for the same user. Managed mode exits with an
-error if tokens are reused or authentication fails. It does not test OpenAI's
-revocation policy. See [investigation notes](docs/auth-investigation.md).
+MIT
